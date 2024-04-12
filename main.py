@@ -1,4 +1,5 @@
 import subprocess
+import threading
 from math import pi
 
 import can
@@ -36,7 +37,8 @@ class PID:
         self.p_out = self.i_out = self.d_out = 0.0
         self.out = 0.0
 
-    def limit(self, value, max_value):
+    @staticmethod
+    def limit(value, max_value):
         if max_value is not None:
             return max(min(value, max_value), -max_value)
         return value
@@ -109,7 +111,7 @@ class MotorM3508:
         return self.pid.update(self.motor_target_speed, self.motor_mechanical_speed)
 
 
-Kp = 0.0
+Kp = 1.0
 Ki = 0.0
 Kd = 0.0
 chassis_motors = [MotorM3508(i, True, Kp, Ki, Kd) for i in range(CHASSIS_MOTOR_NUM)]
@@ -121,7 +123,21 @@ class MotorM3508RxHandler(can.Listener):
 
     def on_message_received(self, message: can.Message) -> None:
         if 0x200 < message.arbitration_id < 0x205:
-            chassis_motor_data_received(message)
+            self.chassis_motor_data_received(message)
+
+    @staticmethod
+    def chassis_motor_data_received(message: can.Message) -> None:
+        if message.dlc != 8:
+            return
+        chassis_motors[message.arbitration_id - 0x201].update_motor_data(*parse_c620_data(message.data))
+
+
+def can_send_message(bus, message_id, data, timeout=None):
+    bus.send(can.Message(arbitration_id=int(message_id, 10), data=data), timeout=timeout)
+
+
+def can_receive_messages(bus, timeout=None):
+    return bus.recv(timeout)
 
 
 def parse_c620_data(data):
@@ -133,18 +149,23 @@ def parse_c620_data(data):
     return rotor_angle, rotor_speed, torque_current, motor_temperature
 
 
-def chassis_motor_data_received(message: can.Message) -> None:
-    if message.dlc != 8:
-        return
-    chassis_motors[message.arbitration_id - 0x201].update_motor_data(*parse_c620_data(message.data))
+def parse_c620_current(value):
+    value = value & 0xFFFF
+
+    low_byte = value & 0xFF
+    high_byte = (value >> 8) & 0xFF
+
+    return bytes([high_byte, low_byte])
 
 
-def can_send_message(bus, message_id, data, timeout=None):
-    bus.send(can.Message(arbitration_id=int(message_id, 10), data=data), timeout=timeout)
+def can_transmit(bus, message_id, data_1, data_2, data_3, data_4, timeout=None):
+    data = bytes([message_id, data_1, data_2, data_3, data_4])
+    can_send_message(bus, message_id, data, timeout)
 
 
-def can_receive_messages(bus, timeout=None):
-    return bus.recv(timeout)
+def chassis_task(bus):
+    while True:
+        can_transmit(bus, 0x200, *[chassis_motors[i].need_torque_current for i in range(CHASSIS_MOTOR_NUM)])
 
 
 if __name__ == "__main__":
@@ -153,5 +174,9 @@ if __name__ == "__main__":
     with can.interface.Bus(interface='socketcan', channel="can0", bitrate=1000000) as can0:
         m3508_rx_handler = MotorM3508RxHandler()
         can.Notifier(bus=can0, listeners=[m3508_rx_handler])
+
+        thread_chassis_task = threading.Thread(target=chassis_task, args=(can0,), daemon=True)
+        thread_chassis_task.start()
+
         while True:
             print(chassis_motors[0].motor_mechanical_speed)
