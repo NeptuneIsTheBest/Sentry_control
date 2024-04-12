@@ -1,4 +1,5 @@
 import subprocess
+import sys
 import threading
 from math import pi
 
@@ -110,6 +111,15 @@ class MotorM3508:
     def need_torque_current(self):
         return self.pid.update(self.motor_target_speed, self.motor_mechanical_speed)
 
+    def __str__(self):
+        return ("Motor ID: {} Angle: {} Speed: {} Target Speed: {}"
+                " Current: {} Target Current: {}").format(self.motor_id,
+                                                          self.rotor_angle,
+                                                          self.motor_mechanical_speed,
+                                                          self.motor_target_speed,
+                                                          self.torque_current,
+                                                          self.need_torque_current)
+
 
 Kp = 1.0
 Ki = 0.0
@@ -168,6 +178,14 @@ def chassis_task(bus):
         can_transmit(bus, 0x200, *[chassis_motors[i].need_torque_current for i in range(CHASSIS_MOTOR_NUM)])
 
 
+def print_chassis_motors():
+    data = []
+    for i in range(CHASSIS_MOTOR_NUM):
+        data.append(str(chassis_motors[i]))
+    print("\n".join(data), end="\r")
+    sys.stdout.flush()
+
+
 if __name__ == "__main__":
     subprocess.run("sudo ip link set can0 type can bitrate 1000000".split())
     subprocess.run("sudo ifconfig can0 up".split())
@@ -179,4 +197,4 @@ if __name__ == "__main__":
         thread_chassis_task.start()
 
         while True:
-            print(chassis_motors[0].motor_mechanical_speed)
+            print_chassis_motors()
