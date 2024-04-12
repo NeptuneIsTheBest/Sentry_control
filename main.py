@@ -160,7 +160,7 @@ def parse_c620_data(data):
 
 
 def parse_c620_current(value):
-    value = value & 0xFFFF
+    value = int(value) & 0xFFFF
 
     low_byte = value & 0xFF
     high_byte = (value >> 8) & 0xFF
@@ -169,7 +169,10 @@ def parse_c620_current(value):
 
 
 def can_transmit(bus, message_id, data_1, data_2, data_3, data_4, timeout=None):
-    data = bytes([message_id, data_1, data_2, data_3, data_4])
+    data = bytes([parse_c620_current(data_1),
+                  parse_c620_current(data_2),
+                  parse_c620_current(data_3),
+                  parse_c620_current(data_4)])
     can_send_message(bus, message_id, data, timeout)
 
 
@@ -182,7 +185,7 @@ def print_chassis_motors():
     data = []
     for i in range(CHASSIS_MOTOR_NUM):
         data.append(str(chassis_motors[i]))
-    print("\n".join(data), end="\r")
+    print("\n".join(data))
     sys.stdout.flush()
 
 
