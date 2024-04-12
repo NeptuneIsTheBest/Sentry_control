@@ -1,9 +1,13 @@
+import os
+import struct
 import subprocess
 import sys
 import threading
+import time
 from math import pi
 
 import can
+import psutil
 
 CHASSIS_MOTOR_NUM = 4
 LF = 0
@@ -121,7 +125,7 @@ class MotorM3508:
                                                           self.need_torque_current)
 
 
-Kp = 1.0
+Kp = 1000000.0
 Ki = 0.0
 Kd = 0.0
 chassis_motors = [MotorM3508(i, True, Kp, Ki, Kd) for i in range(CHASSIS_MOTOR_NUM)]
@@ -143,7 +147,8 @@ class MotorM3508RxHandler(can.Listener):
 
 
 def can_send_message(bus, message_id, data, timeout=None):
-    bus.send(can.Message(arbitration_id=int(message_id, 10), data=data), timeout=timeout)
+    bus.send(can.Message(timestamp=time.time(), arbitration_id=int(message_id), data=data, is_extended_id=False),
+             timeout=timeout)
 
 
 def can_receive_messages(bus, timeout=None):
@@ -152,27 +157,36 @@ def can_receive_messages(bus, timeout=None):
 
 def parse_c620_data(data):
     rotor_angle = (data[0] << 8) + data[1]
+    if rotor_angle & 0x8000:
+        rotor_angle -= 0x10000
+
     rotor_speed = (data[2] << 8) + data[3]
+    if rotor_speed & 0x8000:
+        rotor_speed -= 0x10000
+
     torque_current = (data[4] << 8) + data[5]
+    if torque_current & 0x8000:
+        torque_current -= 0x10000
+
     motor_temperature = data[6]
 
     return rotor_angle, rotor_speed, torque_current, motor_temperature
 
 
 def parse_c620_current(value):
-    value = int(value) & 0xFFFF
+    value = int(value)
+    if not -32768 <= value <= 32767:
+        raise ValueError("value is out of the range of a 16-bit signed integer")
 
-    low_byte = value & 0xFF
-    high_byte = (value >> 8) & 0xFF
-
-    return bytes([high_byte, low_byte])
+    packed_value = struct.pack('>h', value)
+    return packed_value
 
 
 def can_transmit(bus, message_id, data_1, data_2, data_3, data_4, timeout=None):
-    data = bytes([parse_c620_current(data_1),
-                  parse_c620_current(data_2),
-                  parse_c620_current(data_3),
-                  parse_c620_current(data_4)])
+    data = (parse_c620_current(data_1) +
+            parse_c620_current(data_2) +
+            parse_c620_current(data_3) +
+            parse_c620_current(data_4))
     can_send_message(bus, message_id, data, timeout)
 
 
@@ -191,7 +205,14 @@ def print_chassis_motors():
 
 if __name__ == "__main__":
     subprocess.run("sudo ip link set can0 type can bitrate 1000000".split())
+    subprocess.run("sudo ifconfig can0 down".split())
     subprocess.run("sudo ifconfig can0 up".split())
+    subprocess.run("sudo ifconfig can0 txqueuelen 1000".split())
+
+    os.setpriority(os.PRIO_PROCESS, 0, -20)
+    # current_process = psutil.Process()
+    # current_process.cpu_affinity([1, 2])
+
     with can.interface.Bus(interface='socketcan', channel="can0", bitrate=1000000) as can0:
         m3508_rx_handler = MotorM3508RxHandler()
         can.Notifier(bus=can0, listeners=[m3508_rx_handler])
@@ -199,5 +220,4 @@ if __name__ == "__main__":
         thread_chassis_task = threading.Thread(target=chassis_task, args=(can0,), daemon=True)
         thread_chassis_task.start()
 
-        while True:
-            print_chassis_motors()
+        thread_chassis_task.join()
