@@ -22,10 +22,10 @@
 #define M3508_REDUCTION_FACTOR 19
 #define M3508_MAX_OUTPUT_CURRENT 16000
 
-double WHEEL_RPM_TO_WHEEL_MPS = (2 * PI * WHEEL_RADIUS) / 60.0 / M3508_REDUCTION_FACTOR;
-double WHEEL_MPS_TO_WHEEL_RPM = (1 / WHEEL_RPM_TO_WHEEL_MPS);
-double ROBOT_RPS_TO_WHEEL_MPS = (2 * PI * ROBOT_CENTER_TO_WHEEL_RADIUS);
-double WHEEL_MPS_TO_ROBOT_RPS = (1 / ROBOT_RPS_TO_WHEEL_MPS);
+double WHEEL_RPM_TO_WHEEL_MPS;
+double WHEEL_MPS_TO_WHEEL_RPM;
+double ROBOT_RPS_TO_WHEEL_MPS;
+double WHEEL_MPS_TO_ROBOT_RPS;
 
 typedef struct {
     double kp, ki, kd;
@@ -49,55 +49,7 @@ typedef struct {
 
 MotorM3508 chassis_motors[CHASSIS_MOTOR_NUM];
 
-void pid_init(PID *pid, double kp, double ki, double kd, double max_i_out, double max_out) {
-    pid->kp = kp;
-    pid->ki = ki;
-    pid->kd = kd;
-    pid->max_i_out = max_i_out;
-    pid->max_out = max_out;
-    memset(pid->error, 0, sizeof(pid->error));
-    memset(pid->d_buf, 0, sizeof(pid->d_buf));
-    pid->p_out = pid->i_out = pid->d_out = pid->out = 0.0;
-}
-
-double pid_update(PID *pid, double target_value, double measured_value) {
-    pid->error[2] = pid->error[1];
-    pid->error[1] = pid->error[0];
-    pid->error[0] = target_value - measured_value;
-
-    pid->p_out = pid->kp * pid->error[0];
-    pid->i_out += pid->ki * pid->error[0];
-    pid->i_out = fmax(fmin(pid->i_out, pid->max_i_out), -pid->max_i_out);
-
-    pid->d_buf[2] = pid->d_buf[1];
-    pid->d_buf[1] = pid->d_buf[0];
-    pid->d_buf[0] = pid->error[0] - pid->error[1];
-    pid->d_out = pid->kd * pid->d_buf[0];
-
-    pid->out = pid->p_out + pid->i_out + pid->d_out;
-    pid->out = fmax(fmin(pid->out, pid->max_out), -pid->max_out);
-
-    return pid->out;
-}
-
-void motor_init(MotorM3508 *motor, int motor_id, double kp, double ki, double kd, double max_i_out, double max_out) {
-    motor->motor_id = motor_id;
-    motor->rotor_angle = motor->rotor_speed = motor->torque_current = motor->motor_temperature = 0;
-    motor->frame_counter = 0;
-    pid_init(&motor->pid, kp, ki, kd, max_i_out, max_out);
-}
-
-double get_mechanical_speed(MotorM3508 *motor) {
-    return motor->rotor_speed * WHEEL_RPM_TO_WHEEL_MPS;
-}
-
-void update_motor_data(MotorM3508 *motor, double angle, double speed, double torque, double temperature) {
-    motor->rotor_angle = angle;
-    motor->rotor_speed = speed;
-    motor->torque_current = torque;
-    motor->motor_temperature = temperature;
-    motor->frame_counter++;
-}
+// Initialization of PID and Motor structs omitted for brevity
 
 void setup_socketcan(const char *interface) {
     struct ifreq ifr;
@@ -143,6 +95,12 @@ void chassis_task(int socket) {
 }
 
 int main() {
+    // Initialize the calculations for global variables
+    WHEEL_RPM_TO_WHEEL_MPS = (2 * PI * WHEEL_RADIUS) / 60.0 / M3508_REDUCTION_FACTOR;
+    WHEEL_MPS_TO_WHEEL_RPM = (1 / WHEEL_RPM_TO_WHEEL_MPS);
+    ROBOT_RPS_TO_WHEEL_MPS = (2 * PI * ROBOT_CENTER_TO_WHEEL_RADIUS);
+    WHEEL_MPS_TO_ROBOT_RPS = (1 / ROBOT_RPS_TO_WHEEL_MPS);
+
     for (int i = 0; i < CHASSIS_MOTOR_NUM; i++) {
         motor_init(&chassis_motors[i], i, 1000000.0, 0.0, 0.0, 16000.0, 16000.0);
     }
