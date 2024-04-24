@@ -3,20 +3,6 @@ import struct
 import cv2 as cv
 import serial
 
-UPPER_PC_COMM_RECORD_ARRAY_LENGTH = 16
-UPPER_PC_COMM_SEND_LENGTH = 20
-UPPER_PC_COMM_REC_LENGTH = 16
-UPPER_PC_COMM_REC_SOF = 0x66
-UPPER_PC_COMM_REC_EOF = 0x88
-
-COMM_SET_UP_FRAME = 0xCCCC
-RECORD_ANGLE_FRAME = 0xFFFF
-REQUEST_TRANSMIT_FRAME = 0xBBBB
-SHOOT_ALLOW_FRAME = 0x0202
-SHOOT_AUTO_FRAME = 0x0101
-BLUE_TEAM_FRAME = 0xDDDD
-RED_TEAM_FRAME = 0xEEEE
-
 
 class LowerComputerComm:
     def __init__(self, port="/dev/ttyACM0", baudrate=115200):
@@ -30,16 +16,41 @@ class LowerComputerComm:
     def close(self):
         self.ser.close()
 
-    def send(self, frame_type, target_pitch_angle_d, target_yaw_angle_d, target_speed_on_rail, target_locked):
-        frame = struct.pack("<BBHffHBB",
-                            UPPER_PC_COMM_REC_SOF,
-                            frame_type, target_pitch_angle_d, target_yaw_angle_d, target_speed_on_rail, target_locked,
-                            UPPER_PC_COMM_REC_EOF)
-        print(frame)
-        self.ser.write(frame)
+    def send(self, data):
+        self.ser.write(data)
 
     def recv(self):
-        self.ser.read_until(bytes(UPPER_PC_COMM_REC_EOF))
+        data = self.ser.read(self.ser.in_waiting)
+        return self.parse_data(data)
+
+    def parse_data(self, data):
+        # 解析帧头
+        protocol_header = data[0:4]
+        sof, data_length, crc_check = struct.unpack('>BHB', protocol_header)
+        if sof != 0xA5:
+            raise ValueError("Invalid SOF (Start of Frame)")
+
+        # 解析命令码ID
+        cmd_id = struct.unpack('>H', data[4:6])[0]
+
+        # 解析数据段
+        data_offset = 6
+        flags_register = struct.unpack('>H', data[data_offset:data_offset + 2])[0]
+        data_offset += 2
+        float_data = []
+        for i in range(data_length):
+            float_data.append(struct.unpack('>f', data[data_offset:data_offset + 4])[0])
+            data_offset += 4
+
+        # 解析帧尾CRC校验
+        frame_tail = data[data_offset:data_offset + 2]
+
+        return {
+            'cmd_id': cmd_id,
+            'flags_register': flags_register,
+            'float_data': float_data,
+            'frame_tail': frame_tail
+        }
 
     def __del__(self):
         self.ser.close()
@@ -161,6 +172,7 @@ def draw_armor(image, armors, color=(255, 0, 0), thickness=1, radius=5, hit_poin
 
     return image
 
+
 """
 TARGET_COLOR = "RED"
 
@@ -188,4 +200,4 @@ while video.isOpened():
 cv.destroyAllWindows()
 """
 
-s = LowerComputerComm("/dev/")
+s = LowerComputerComm()
