@@ -1,59 +1,77 @@
 import struct
+import zlib
 
 import cv2 as cv
 import serial
 
 
-class LowerComputerComm:
-    def __init__(self, port="/dev/ttyACM0", baudrate=115200):
-        self.port = port
-        self.baudrate = baudrate
+class SerialProtocolParser:
+    def __init__(self, port, baudrate=115200):
         self.ser = serial.Serial(port, baudrate)
 
-    def open(self):
-        self.ser.open()
+    def _find_header(self):
+        while True:
+            byte = self.ser.read(1)
+            if byte == b'\xA5':  # 找到帧头
+                return self.ser.read(3)  # 读取剩余的头部字节
 
-    def close(self):
-        self.ser.close()
+    def _parse_header(self, header):
+        if len(header) != 4 or header[0] != 0xA5:
+            raise ValueError("Invalid header format")
 
-    def send(self, data):
-        self.ser.write(data)
+        data_length = struct.unpack("<H", header[1:3])[0]
+        header_crc = header[3]
+        calculated_crc = self._calculate_header_crc(header)
 
-    def recv(self):
-        data = self.ser.read(self.ser.in_waiting)
-        return self.parse_data(data)
+        if header_crc != calculated_crc:
+            raise ValueError("Header CRC check failed")
 
-    def parse_data(self, data):
-        # 解析帧头
-        protocol_header = data[0:4]
-        sof, data_length, crc_check = struct.unpack('>BHB', protocol_header)
-        if sof != 0xA5:
-            raise ValueError("Invalid SOF (Start of Frame)")
+        return data_length, header_crc
 
-        # 解析命令码ID
-        cmd_id = struct.unpack('>H', data[4:6])[0]
+    def _calculate_header_crc(self, header):
+        data = header[:3]  # Exclude the crc_check byte
+        crc = 0xFFFF  # Initial CRC value
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                crc = (crc >> 1) ^ (0xA001 if crc & 1 else 0)
+        return crc
+
+    def _calculate_frame_crc(self, frame):
+        # 使用 zlib 计算 CRC16 校验和
+        crc = zlib.crc32(frame) & 0xFFFF
+        return crc
+
+    def read_frame(self):
+        header = self._find_header()
+        data_length, _ = self._parse_header(header)
+
+        # 读取数据段和帧尾
+        data = self.ser.read(data_length + 2)
+
+        frame_crc = struct.unpack("<H", data[-2:])[0]
+        calculated_crc = self._calculate_frame_crc(header + data[:-2])
+
+        if frame_crc != calculated_crc:
+            raise ValueError("Frame CRC check failed")
 
         # 解析数据段
-        data_offset = 6
-        flags_register = struct.unpack('>H', data[data_offset:data_offset + 2])[0]
-        data_offset += 2
-        float_data = []
-        for i in range(data_length):
-            float_data.append(struct.unpack('>f', data[data_offset:data_offset + 4])[0])
-            data_offset += 4
+        flags_register = struct.unpack("<H", data[:2])[0]
+        float_data = struct.unpack("<" + "f" * (data_length // 4), data[2:-2])
 
-        # 解析帧尾CRC校验
-        frame_tail = data[data_offset:data_offset + 2]
+        return flags_register, float_data
 
-        return {
-            'cmd_id': cmd_id,
-            'flags_register': flags_register,
-            'float_data': float_data,
-            'frame_tail': frame_tail
-        }
+    def send_frame(self, cmd_id, data):
+        data_length = len(data) // 4  # 假设 data 是 float 类型的数据
+        header = struct.pack("<BHHB", 0xA5, data_length, 0, 0)
+        header_crc = self._calculate_header_crc(header)
+        header = struct.pack("<BHHB", 0xA5, data_length, header_crc, cmd_id)
 
-    def __del__(self):
-        self.ser.close()
+        frame = header + data
+        frame_crc = self._calculate_frame_crc(frame)
+        frame += struct.pack("<H", frame_crc)
+
+        self.ser.write(frame)
 
 
 def pre_process(image, threshold=120, color="RED"):
