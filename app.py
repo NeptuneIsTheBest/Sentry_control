@@ -13,32 +13,33 @@ class SerialProtocolParser:
         while True:
             byte = self.ser.read(1)
             if byte == b'\xA5':  # 找到帧头
-                return self.ser.read(3)  # 读取剩余的头部字节
+                return byte + self.ser.read(3)  # 读取剩余的头部字节
 
     def _parse_header(self, header):
         if len(header) != 4 or header[0] != 0xA5:
             raise ValueError("Invalid header format")
-
         data_length = struct.unpack("<H", header[1:3])[0]
         header_crc = header[3]
-        calculated_crc = self._calculate_header_crc(header)
-
+        calculated_crc = self._calculate_header_crc8(header)
         if header_crc != calculated_crc:
             raise ValueError("Header CRC check failed")
-
         return data_length, header_crc
 
-    def _calculate_header_crc(self, header):
+    def _calculate_header_crc8(self, header):
+        # 使用 CRC8 算法计算校验和
         data = header[:3]  # Exclude the crc_check byte
-        crc = 0xFFFF  # Initial CRC value
+        crc = 0
         for byte in data:
             crc ^= byte
             for _ in range(8):
-                crc = (crc >> 1) ^ (0xA001 if crc & 1 else 0)
-        return crc
+                if crc & 0x80:
+                    crc = (crc << 1) ^ 0x07
+                else:
+                    crc <<= 1
+        return crc & 0xFF  # 返回低 8 位
 
     def _calculate_frame_crc(self, frame):
-        # 使用 zlib 计算 CRC16 校验和
+        # 使用 zlib 计算 CRC16 校验和 (保持不变)
         crc = zlib.crc32(frame) & 0xFFFF
         return crc
 
@@ -64,7 +65,7 @@ class SerialProtocolParser:
     def send_frame(self, cmd_id, data):
         data_length = len(data) // 4  # 假设 data 是 float 类型的数据
         header = struct.pack("<BHHB", 0xA5, data_length, 0, 0)
-        header_crc = self._calculate_header_crc(header)
+        header_crc = self._calculate_header_crc8(header)
         header = struct.pack("<BHHB", 0xA5, data_length, header_crc, cmd_id)
 
         frame = header + data
