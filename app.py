@@ -9,20 +9,29 @@ class SerialProtocolParser:
     def __init__(self, port, baudrate=115200):
         self.ser = serial.Serial(port, baudrate)
 
+    def open_serial(self):
+        self.ser.open()
+
+    def close_serial(self):
+        self.ser.close()
+
     def _find_header(self):
         while True:
             byte = self.ser.read(1)
-            if byte == b'\xA5':  # 找到帧头
-                return byte + self.ser.read(3)  # 读取剩余的头部字节
+            if byte == b'\xA5':  # 找到SOF 0xA5
+                return byte + self.ser.read(3)  # 返回整个帧头
 
     def _parse_header(self, header):
         if len(header) != 4 or header[0] != 0xA5:
             raise ValueError("Invalid header format")
-        data_length = struct.unpack("<H", header[1:3])[0]
-        header_crc = header[3]
+
+        # 从帧头提取数据长度和帧头CRC校验值
+        data_length, header_crc = struct.unpack("<HB", header[1:])
         calculated_crc = self._calculate_header_crc8(header)
+
         if header_crc != calculated_crc:
             raise ValueError("Header CRC check failed")
+
         return data_length, header_crc
 
     def _calculate_header_crc8(self, header):
@@ -47,32 +56,44 @@ class SerialProtocolParser:
         header = self._find_header()
         data_length, _ = self._parse_header(header)
 
-        # 读取数据段和帧尾
-        data = self.ser.read(data_length + 2)
+        # 读取控制位
+        cmd_id = self.ser.read(2)
 
-        frame_crc = struct.unpack("<H", data[-2:])[0]
-        calculated_crc = self._calculate_frame_crc(header + data[:-2])
+        # 读取数据位
+        data = self.ser.read(2 + 4 * data_length)
+
+        frame_crc = struct.unpack("<H", self.ser.read(2))[0]
+        calculated_crc = self._calculate_frame_crc(header + cmd_id + data)
 
         if frame_crc != calculated_crc:
             raise ValueError("Frame CRC check failed")
 
         # 解析数据段
         flags_register = struct.unpack("<H", data[:2])[0]
-        float_data = struct.unpack("<" + "f" * (data_length // 4), data[2:-2])
+        float_data = struct.unpack("<{}f".format(data_length), data[2:])
 
-        return flags_register, float_data
+        return cmd_id, flags_register, float_data
 
-    def send_frame(self, cmd_id, data):
-        data_length = len(data) // 4  # 假设 data 是 float 类型的数据
-        header = struct.pack("<BHHB", 0xA5, data_length, 0, 0)
+    def send_frame(self, cmd_id, flags_register, data):
+        data_length = len(data) // 4
+        header = struct.pack("<BH", 0xA5, data_length)
         header_crc = self._calculate_header_crc8(header)
-        header = struct.pack("<BHHB", 0xA5, data_length, header_crc, cmd_id)
+        header = struct.pack("<BHB", 0xA5, data_length, header_crc)
 
-        frame = header + data
+        cmd_id = struct.pack("<H", cmd_id)
+
+        flags_register = struct.pack("<H", flags_register)
+
+        data = struct.pack("<{}f".format(data_length), *data)
+
+        frame = header + cmd_id + flags_register + data
         frame_crc = self._calculate_frame_crc(frame)
         frame += struct.pack("<H", frame_crc)
 
         self.ser.write(frame)
+
+    def __del__(self):
+        self.close_serial()
 
 
 def pre_process(image, threshold=120, color="RED"):
@@ -219,4 +240,6 @@ while video.isOpened():
 cv.destroyAllWindows()
 """
 
-s = LowerComputerComm()
+with SerialProtocolParser("/dev/ttyACM0", 115200) as s:
+    while True:
+        pass
