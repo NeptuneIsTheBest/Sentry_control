@@ -240,6 +240,11 @@ while video.isOpened():
 cv.destroyAllWindows()
 """
 
-with SerialProtocolParser("/dev/ttyACM0", 115200) as s:
+with SerialProtocolParser("/dev/ttyACM0") as parser:
+    parser.open_serial()
     while True:
-        pass
+        try:
+            cmd_id, flags_register, float_data = parser.read_frame()
+            print(cmd_id, flags_register, float_data)
+        except ValueError:
+            continue
