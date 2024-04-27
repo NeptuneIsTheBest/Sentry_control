@@ -1,9 +1,13 @@
 import struct
 import subprocess
-import zlib
 
 import cv2 as cv
 import serial
+
+CRC_START_8 = 0x00
+
+CRC_START_16 = 0xFFFF
+CRC_POLY_16 = 0xA001
 
 crc_tab8 = [
     0, 49, 98, 83, 196, 245, 166, 151, 185, 136, 219, 234, 125, 76, 31, 46,
@@ -26,11 +30,6 @@ crc_tab8 = [
 
 crc_tab16_init = False
 crc_tab16 = [0] * 256
-
-CRC_START_8 = 0x00
-
-CRC_START_16 = 0xFFFF
-CRC_POLY_16 = 0xA001
 
 
 def crc_8(input_bytes) -> int:
@@ -79,44 +78,22 @@ class SerialProtocolParser:
 
     def _find_header(self):
         while True:
-            byte = self.ser.read(1)
-            if byte == b'\xA5':  # 找到SOF 0xA5
-                return byte + self.ser.read(3)  # 返回整个帧头
-
-    def _parse_header(self, header):
-        if len(header) != 4 or header[0] != 0xA5:
-            raise ValueError("Invalid header format")
+            header = self.ser.read(1)
+            if header == b'\xA5':  # 找到SOF 0xA5
+                header += self.ser.read(3)  # 返回整个帧头
+                break
 
         # 从帧头提取数据长度和帧头CRC校验值
         data_length, header_crc = struct.unpack("<HB", header[1:])
-        calculated_crc = crc_8(header[:3])
+        calculated_crc = crc_8(header[:3])  # 排除CRC校验位
 
         if header_crc != calculated_crc:
             raise ValueError("Header CRC check failed")
 
-        return data_length, header_crc
-
-    def _calculate_header_crc8(self, header):
-        # 使用 CRC8 算法计算校验和
-        data = header[:3]  # Exclude the crc_check byte
-        crc = 0
-        for byte in data:
-            crc ^= byte
-            for _ in range(8):
-                if crc & 0x80:
-                    crc = (crc << 1) ^ 0x07
-                else:
-                    crc <<= 1
-        return crc & 0xFF  # 返回低 8 位
-
-    def _calculate_frame_crc(self, frame):
-        # 使用 zlib 计算 CRC16 校验和 (保持不变)
-        crc = zlib.crc32(frame) & 0xFFFF
-        return crc
+        return header, data_length, header_crc
 
     def read_frame(self):
-        header = self._find_header()
-        data_length, _ = self._parse_header(header)
+        header, data_length, _ = self._find_header()
 
         # 读取控制位
         cmd_id = self.ser.read(2)
@@ -137,7 +114,7 @@ class SerialProtocolParser:
         return cmd_id, flags_register, float_data
 
     def send_frame(self, cmd_id, flags_register, data):
-        data_length = len(data) // 4
+        data_length = len(data)
         header = struct.pack("<BH", 0xA5, data_length)
         header_crc = crc_8(header)
         header = struct.pack("<BHB", 0xA5, data_length, header_crc)
@@ -310,7 +287,6 @@ parser.open_serial()
 
 while True:
     try:
-        cmd_id, flags_register, float_data = parser.read_frame()
-        print(cmd_id, flags_register, float_data)
+        print(parser.read_frame())
     except ValueError:
         continue
