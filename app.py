@@ -20,7 +20,14 @@ sht75_crc_table = [
     71, 118, 37, 20, 131, 178, 225, 208, 254, 207, 156, 173, 58, 11, 88, 105,
     4, 53, 102, 87, 192, 241, 162, 147, 189, 140, 223, 238, 121, 72, 27, 42,
     193, 240, 163, 146, 5, 52, 103, 86, 120, 73, 26, 43, 188, 141, 222, 239,
-    130, 179, 224, 209, 70, 119, 36, 21, 59, 10, 89, 104, 255, 206, 157, 172]
+    130, 179, 224, 209, 70, 119, 36, 21, 59, 10, 89, 104, 255, 206, 157, 172
+]
+
+crc_tab16_init = False
+crc_tab16 = [0] * 256
+
+CRC_START_16 = 0xFFFF
+CRC_POLY_16 = 0xA001
 
 
 def crc_8(input_str):
@@ -28,6 +35,35 @@ def crc_8(input_str):
     for a in range(len(input_str)):
         crc = sht75_crc_table[(input_str[a]) ^ crc]
     return crc
+
+
+def crc_16(input_str) -> int:
+    crc = CRC_START_16
+    ptr = input_str
+
+    if not crc_tab16_init:
+        init_crc16_tab()
+
+    if ptr is not None:
+        for a in range(len(input_str)):
+            crc = (crc >> 8) ^ crc_tab16[(crc ^ ptr[a]) & 0xFF]
+
+    return crc
+
+
+def init_crc16_tab():
+    global crc_tab16_init
+    for i in range(256):
+        crc = 0
+        c = i
+        for j in range(8):
+            if (crc ^ c) & 0x0001:
+                crc = (crc >> 1) ^ CRC_POLY_16
+            else:
+                crc = crc >> 1
+            c = c >> 1
+        crc_tab16[i] = crc
+    crc_tab16_init = True
 
 
 class SerialProtocolParser:
@@ -52,7 +88,7 @@ class SerialProtocolParser:
 
         # 从帧头提取数据长度和帧头CRC校验值
         data_length, header_crc = struct.unpack("<HB", header[1:])
-        calculated_crc = crc_8(header)
+        calculated_crc = crc_8(header[:3])
 
         if header_crc != calculated_crc:
             raise ValueError("Header CRC check failed")
