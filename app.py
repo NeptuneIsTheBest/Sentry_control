@@ -5,7 +5,7 @@ import zlib
 import cv2 as cv
 import serial
 
-sht75_crc_table = [
+crc_tab8 = [
     0, 49, 98, 83, 196, 245, 166, 151, 185, 136, 219, 234, 125, 76, 31, 46,
     67, 114, 33, 16, 135, 182, 229, 212, 250, 203, 152, 169, 62, 15, 92, 109,
     134, 183, 228, 213, 66, 115, 32, 17, 63, 14, 93, 108, 251, 202, 153, 168,
@@ -27,27 +27,27 @@ sht75_crc_table = [
 crc_tab16_init = False
 crc_tab16 = [0] * 256
 
+CRC_START_8 = 0x00
+
 CRC_START_16 = 0xFFFF
 CRC_POLY_16 = 0xA001
 
 
-def crc_8(input_str):
-    crc = 0
-    for a in range(len(input_str)):
-        crc = sht75_crc_table[(input_str[a]) ^ crc]
+def crc_8(input_bytes) -> int:
+    crc = CRC_START_8
+    for i in range(len(input_bytes)):
+        crc = crc_tab8[(input_bytes[i]) ^ crc]
     return crc
 
 
-def crc_16(input_str) -> int:
+def crc_16(input_bytes) -> int:
     crc = CRC_START_16
-    ptr = input_str
 
     if not crc_tab16_init:
         init_crc16_tab()
 
-    if ptr is not None:
-        for a in range(len(input_str)):
-            crc = (crc >> 8) ^ crc_tab16[(crc ^ ptr[a]) & 0xFF]
+    for i in range(len(input_bytes)):
+        crc = (crc >> 8) ^ crc_tab16[(crc ^ input_bytes[i]) & 0xFF]
 
     return crc
 
@@ -125,7 +125,7 @@ class SerialProtocolParser:
         data = self.ser.read(2 + 4 * data_length)
 
         frame_crc = struct.unpack("<H", self.ser.read(2))[0]
-        calculated_crc = self._calculate_frame_crc(header + cmd_id + data)
+        calculated_crc = crc_16(header + cmd_id + data)
 
         if frame_crc != calculated_crc:
             raise ValueError("Frame CRC check failed")
@@ -139,7 +139,7 @@ class SerialProtocolParser:
     def send_frame(self, cmd_id, flags_register, data):
         data_length = len(data) // 4
         header = struct.pack("<BH", 0xA5, data_length)
-        header_crc = self._calculate_header_crc8(header)
+        header_crc = crc_8(header)
         header = struct.pack("<BHB", 0xA5, data_length, header_crc)
 
         cmd_id = struct.pack("<H", cmd_id)
@@ -149,7 +149,7 @@ class SerialProtocolParser:
         data = struct.pack("<{}f".format(data_length), *data)
 
         frame = header + cmd_id + flags_register + data
-        frame_crc = self._calculate_frame_crc(frame)
+        frame_crc = crc_16(frame)
         frame += struct.pack("<H", frame_crc)
 
         self.ser.write(frame)
