@@ -1,4 +1,5 @@
 import struct
+import subprocess
 import zlib
 
 import cv2 as cv
@@ -300,6 +301,8 @@ while video.isOpened():
 
 cv.destroyAllWindows()
 """
+
+subprocess.run("sudo chmod 666 /dev/ttyACM0".split())
 
 parser = SerialProtocolParser("/dev/ttyACM0")
 parser.close_serial()
