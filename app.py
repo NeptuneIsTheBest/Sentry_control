@@ -1,7 +1,12 @@
+import platform
 import struct
+import subprocess
 
 import cv2 as cv
+import numpy as np
 import serial
+
+import mvsdk
 
 CRC_START_8 = 0x00
 
@@ -120,7 +125,7 @@ class SerialProtocolParser:
 
         flags_register = struct.pack("<H", flags_register)
 
-        data = struct.pack("<{}f".format(data_length), *data)
+        data = struct.pack("<{}f".format(len(data)), *data)
 
         frame = header + cmd_id + flags_register + data
         frame_crc = crc_16(frame)
@@ -249,41 +254,155 @@ def draw_armor(image, armors, color=(255, 0, 0), thickness=1, radius=5, hit_poin
     return image
 
 
-"""
+class MvCamera:
+    def __init__(self, pipe=0, img_size=640):
+        self.pipe = pipe
+        self.img_size = img_size
+
+        dev_list = mvsdk.CameraEnumerateDevice()
+        if len(dev_list) == 0:
+            raise RuntimeError("No camera devices found")
+
+        assert self.pipe < len(dev_list)
+
+        self.dev_info = dev_list[self.pipe]
+
+        self.camera_handle = mvsdk.CameraInit(self.dev_info)
+        self.camera_capability = mvsdk.CameraGetCapability(self.camera_handle)
+
+        mono_camera = (self.camera_capability.sIspCapacity.bMonoSensor != 0)
+        if mono_camera:
+            mvsdk.CameraSetIspOutFormat(self.camera_handle, mvsdk.CAMERA_MEDIA_TYPE_MONO8)
+        else:
+            mvsdk.CameraSetIspOutFormat(self.camera_handle, mvsdk.CAMERA_MEDIA_TYPE_BGR8)
+
+        mvsdk.CameraSetTriggerMode(self.camera_handle, 0)
+
+        mvsdk.CameraSetAeState(self.camera_handle, 0)
+        mvsdk.CameraSetExposureTime(self.camera_handle, 30 * 1000)
+
+        mvsdk.CameraPlay(self.camera_handle)
+
+        self.frame_buffer_size = self.camera_capability.sResolutionRange.iWidthMax * self.camera_capability.sResolutionRange.iHeightMax * (
+            1 if mono_camera else 3)
+        self.frame_buffer = mvsdk.CameraAlignMalloc(self.frame_buffer_size, 16)
+
+    def camera_calibrate(self):
+        # TODO: code to calibrate camera
+        pass
+
+    def __iter__(self):
+        return self
+
+    def __del__(self):
+        mvsdk.CameraUnInit(self.camera_handle)
+        mvsdk.CameraAlignFree(self.frame_buffer)
+
+    def __next__(self):
+        try:
+            raw_data, frame_header = mvsdk.CameraGetImageBuffer(self.camera_handle, 10)
+            mvsdk.CameraImageProcess(self.camera_handle, raw_data, self.frame_buffer, frame_header)
+            mvsdk.CameraReleaseImageBuffer(self.camera_handle, raw_data)
+
+            frame_data = (mvsdk.c_ubyte * frame_header.uBytes).from_address(self.frame_buffer)
+            frame = np.frombuffer(frame_data, np.uint8)
+            frame = frame.reshape(frame_header.iHeight * frame_header.iWidth,
+                                  1 if frame_header.uiMediaType == mvsdk.CAMERA_MEDIA_TYPE_MONO8 else 3)
+
+            frame = cv.resize(frame, (self.img_size, self.img_size), interpolation=cv.INTER_LINEAR)
+
+            return frame
+        except mvsdk.CameraException as e:
+            print(e)
+
+
 TARGET_COLOR = "RED"
+VCP_PORT = "/dev/tty.usbmodem3359316534391"
 
-video = cv.VideoCapture("1.avi")
+if __name__ == '__main__':
+    if platform.system() == "Linux":
+        subprocess.run("sudo chmod 666 {}".format(VCP_PORT).split())
 
-while video.isOpened():
-    ret, frame = video.read()
-    if ret:
+    parser = SerialProtocolParser("/dev/{}".format(VCP_PORT))
+    parser.close_serial()
+    parser.open_serial()
+
+    mv_camera = MvCamera()
+
+    for frame in mv_camera:
         binary_frame = pre_process(frame, 120, TARGET_COLOR)
-        # cv.imshow("binary", binary_frame)
 
         armor_lights = get_all_armor_light(binary_frame)
-        contours_frame = draw_contours(frame, armor_lights)
-
         armor = get_armor(armor_lights)
+
         target_frame = draw_armor(frame, armor)
 
-        cv.imshow("Frame", target_frame)
-    else:
-        video.release()
-        cv.waitKey(0)
-    if cv.waitKey(1) & 0xFF == ord('q'):
-        break
+        cv.imshow("Target", target_frame)
 
-cv.destroyAllWindows()
-"""
+        if cv.waitKey(1) & 0xFF == ord("q"):
+            break
 
-# subprocess.run("sudo chmod 666 /dev/ttyACM0".split())
+    cv.destroyAllWindows()
+    del mv_camera
+
+# video = cv.VideoCapture("1.avi")
+
+# while video.isOpened():
+#     ret, frame = video.read()
+#     if ret:
+#         binary_frame = pre_process(frame, 120, TARGET_COLOR)
+#         # cv.imshow("binary", binary_frame)
 #
-# parser = SerialProtocolParser("/dev/ttyACM0")
-# parser.close_serial()
-# parser.open_serial()
+#         armor_lights = get_all_armor_light(binary_frame)
+#         contours_frame = draw_contours(frame, armor_lights)
+#
+#         armor = get_armor(armor_lights)
+#         target_frame = draw_armor(frame, armor)
+#
+#         cv.imshow("Frame", target_frame)
+#     else:
+#         video.release()
+#         cv.waitKey(0)
+#     if cv.waitKey(1) & 0xFF == ord('q'):
+#         break
+#
+# cv.destroyAllWindows()
+#
+# cv.namedWindow('Blank Window')
+# cv.imshow('Blank Window', np.zeros((512, 512, 3), np.uint8))
+#
+# keys_down = set()
 #
 # while True:
 #     try:
-#         print(parser.read_frame())
+#         key = cv.waitKey(1) & 0xFF
+#
+#         if key != 255:
+#             keys_down.add(key)
+#         else:
+#             keys_down.clear()
+#
+#         pitch = 0
+#         yaw = 0
+#
+#         vx = 0
+#         vy = 0
+#
+#         if ord('q') in keys_down:
+#             break
+#
+#         if ord('a') in keys_down:
+#             yaw = -1
+#         elif ord('d') in keys_down:
+#             yaw = 1
+#
+#         if ord('w') in keys_down:
+#             pitch = 1
+#         elif ord('s') in keys_down:
+#             pitch = -1
+#
+#         parser.send_frame(0x01, 0, (pitch, yaw, vx, vy, 0, 0))
 #     except ValueError:
 #         continue
+#
+# cv.destroyAllWindows()
