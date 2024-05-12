@@ -321,13 +321,16 @@ class MvCamera:
 
     def __next__(self):
         try:
-            raw_data, frame_header = mvsdk.CameraGetImageBuffer(self.camera_handle, 10)
+            raw_data, frame_header = mvsdk.CameraGetImageBuffer(self.camera_handle, 50)
             mvsdk.CameraImageProcess(self.camera_handle, raw_data, self.frame_buffer, frame_header)
             mvsdk.CameraReleaseImageBuffer(self.camera_handle, raw_data)
 
+            if platform.system() == "Windows":
+                mvsdk.CameraFlipFrameBuffer(self.frame_buffer, frame_header, 1)
+
             frame_data = (mvsdk.c_ubyte * frame_header.uBytes).from_address(self.frame_buffer)
             frame = np.frombuffer(frame_data, np.uint8)
-            frame = frame.reshape(frame_header.iHeight * frame_header.iWidth,
+            frame = frame.reshape(frame_header.iHeight, frame_header.iWidth,
                                   1 if frame_header.uiMediaType == mvsdk.CAMERA_MEDIA_TYPE_MONO8 else 3)
 
             frame = cv.resize(frame, (self.img_size, self.img_size), interpolation=cv.INTER_LINEAR)
