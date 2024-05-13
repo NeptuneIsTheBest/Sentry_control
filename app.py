@@ -417,6 +417,9 @@ if __name__ == '__main__':
     mv_camera = MvCamera()
 
     for frame in mv_camera:
+        ec_data = parser.read_frame()[3]
+        yaw, pitch, roll = ec_data[0], ec_data[1], ec_data[2]
+
         binary_frame = pre_process(frame, 120, TARGET_COLOR)
 
         armor_lights = get_all_armor_light(binary_frame)
@@ -426,6 +429,7 @@ if __name__ == '__main__':
 
         cv.imshow("Target", target_frame)
 
+        parser.send_frame(0x01, set_flag_register([0, 0, 0]), (pitch, yaw, 0, 0, 0, 0))
         if cv.waitKey(1) & 0xFF == ord("q"):
             break
 
