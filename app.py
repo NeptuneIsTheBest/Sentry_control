@@ -341,13 +341,13 @@ class MvCamera:
 
 
 TARGET_COLOR = "RED"
-VCP_PORT = "/dev/tty.usbmodem3359316534391"
+VCP_PORT = "/dev/tty.usbmodem3157376B34391"
 
 if __name__ == '__main__':
     if platform.system() == "Linux":
         subprocess.run("sudo chmod 666 {}".format(VCP_PORT).split())
 
-    parser = SerialProtocolParser("/dev/{}".format(VCP_PORT))
+    parser = SerialProtocolParser("{}".format(VCP_PORT))
     parser.close_serial()
     parser.open_serial()
 
