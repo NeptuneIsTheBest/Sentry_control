@@ -1,3 +1,4 @@
+import pickle
 import platform
 import struct
 import subprocess
@@ -58,6 +59,25 @@ def crc_16(input_bytes) -> int:
         crc = (crc >> 8) ^ crc_tab16[(crc ^ input_bytes[i]) & 0xFF]
 
     return crc
+
+
+def set_flag_register(flags):
+    flag_register = 0
+
+    for i in range(min(len(flags), 4)):
+        flag_register = (flag_register << 4) | (flags[i] & 0xFF)
+
+    return flag_register
+
+
+def get_flag_register(flag_register, flags_length):
+    flags = [0] * flags_length
+
+    for i in range(min(flags_length, 4)):
+        shift_mount = (flags_length - i - 1) * 4
+        flags[i] = (flag_register >> shift_mount) & 0xFF
+
+    return flags
 
 
 class SerialProtocolParser:
@@ -273,6 +293,8 @@ class MvCamera:
     def __init__(self, pipe=0, img_size=640):
         self.pipe = pipe
         self.img_size = img_size
+        self.camera_matrix = None
+        self.dist_coeffs = None
 
         dev_list = mvsdk.CameraEnumerateDevice()
         if len(dev_list) == 0:
@@ -302,6 +324,11 @@ class MvCamera:
             1 if mono_camera else 3)
         self.frame_buffer = mvsdk.CameraAlignMalloc(self.frame_buffer_size, 16)
 
+        try:
+            self.load_camera_calibration_data("camera_calibration.pkl")
+        except FileNotFoundError:
+            self.camera_calibrate()
+
     def camera_calibrate(self, pattern_size=(6, 9), need_points=20):
         objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
         objp[:, :2] = np.mgrid[0:pattern_size[1], 0:pattern_size[0]].T.reshape(-1, 2)
@@ -327,13 +354,26 @@ class MvCamera:
                 frame = cv.drawChessboardCorners(frame, pattern_size, sub_pix_corners, ret)
 
             if len(obj_points) == need_points:
-                return cv.calibrateCamera(obj_points, img_points, (self.img_size, self.img_size), None, None)
+                ret, self.camera_matrix, self.dist_coeffs, rvecs, tvecs = cv.calibrateCamera(obj_points, img_points, (
+                    self.img_size, self.img_size), None, None)
+                self.save_camera_calibration_data("camera_calibration.pkl")
+                return ret, self.camera_matrix, self.dist_coeffs, rvecs, tvecs
 
+            frame = cv.putText(frame, "{}".format(len(img_points)), (10, 10), cv.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0),
+                               5, cv.LINE_AA)
             cv.imshow("Camera Calibration", frame)
             if key == ord("q"):
                 break
 
         cv.destroyWindow("Camera Calibration")
+
+    def save_camera_calibration_data(self, filename):
+        with open(filename, "wb") as f:
+            pickle.dump((self.camera_matrix, self.dist_coeffs), f)
+
+    def load_camera_calibration_data(self, filename):
+        with open(filename, "rb") as f:
+            self.camera_matrix, self.dist_coeffs = pickle.load(f)
 
     def __iter__(self):
         return self
