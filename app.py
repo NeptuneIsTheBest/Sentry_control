@@ -316,7 +316,7 @@ class MvCamera:
         mvsdk.CameraSetTriggerMode(self.camera_handle, 0)
 
         mvsdk.CameraSetAeState(self.camera_handle, 0)
-        mvsdk.CameraSetExposureTime(self.camera_handle, 30 * 1000)
+        mvsdk.CameraSetExposureTime(self.camera_handle, 10 * 1000)
 
         mvsdk.CameraPlay(self.camera_handle)
 
