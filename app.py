@@ -217,6 +217,24 @@ def get_armor(contours):
     return armor
 
 
+def get_armor_corners(armor):
+    if len(armor) != 2:
+        return ()
+
+    left_box = np.intp(cv.boxPoints(cv.minAreaRect(armor[0])))
+    right_box = np.intp(cv.boxPoints(cv.minAreaRect(armor[1])))
+
+    left_box = sorted(left_box, key=lambda x: x[1])
+    lt = (int((left_box[0][0] + left_box[1][0]) / 2), int((left_box[0][1] + left_box[1][1]) / 2))
+    lb = (int((left_box[2][0] + left_box[3][0]) / 2), int((left_box[2][1] + left_box[3][1]) / 2))
+
+    right_box = sorted(right_box, key=lambda x: x[1])
+    rt = (int((right_box[0][0] + right_box[1][0]) / 2), int((right_box[0][1] + right_box[1][1]) / 2))
+    rb = (int((right_box[2][0] + right_box[3][0]) / 2), int((right_box[2][1] + right_box[3][1]) / 2))
+
+    return lt, lb, rt, rb
+
+
 def get_hit_point(armor):
     if len(armor) != 2:
         return ()
@@ -239,9 +257,14 @@ def draw_armor(image, armors, color=(255, 0, 0), thickness=1, radius=5, hit_poin
             rect = cv.minAreaRect(armor_light)
             centers.append((int(rect[0][0]), int(rect[0][1])))
 
-        image = cv.line(image, centers[0], centers[1], color, thickness)
         hit_point = get_hit_point(armor)
+        corners = get_armor_corners(armor)
+        for corner in corners:
+            image = cv.circle(image, corner, radius, hit_point_color, thickness)
         image = cv.circle(image, hit_point, radius, hit_point_color, thickness)
+
+        image = cv.line(image, corners[0], corners[3], color, thickness)
+        image = cv.line(image, corners[1], corners[2], color, thickness)
 
     return image
 
