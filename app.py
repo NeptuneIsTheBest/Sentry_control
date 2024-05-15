@@ -1,3 +1,4 @@
+import math
 import pickle
 import platform
 import struct
@@ -149,10 +150,10 @@ class SerialProtocolParser:
         self.close_serial()
 
 
-def pre_process(image, threshold=120, color="RED"):
+def pre_process(image, gray_threshold=50, threshold=120, color="RED"):
     gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
 
-    _, gray_binary = cv.threshold(gray, threshold, 255, cv.THRESH_BINARY)
+    _, gray_binary = cv.threshold(gray, gray_threshold, 255, cv.THRESH_BINARY)
 
     image_channels = cv.split(image)
     if color == "RED":
@@ -164,7 +165,7 @@ def pre_process(image, threshold=120, color="RED"):
     binary = cv.bitwise_and(color_binary, gray_binary)
 
     element = cv.getStructuringElement(cv.MORPH_RECT, [5, 5], [3, 3])
-    binary = cv.morphologyEx(binary, cv.MORPH_OPEN, element)
+    binary = cv.morphologyEx(color_binary, cv.MORPH_OPEN, element)
 
     element = cv.getStructuringElement(cv.MORPH_RECT, [5, 5], [3, 3])
     binary = cv.morphologyEx(binary, cv.MORPH_CLOSE, element)
@@ -201,9 +202,33 @@ def get_all_armor_light(image):
     return armor_light_contours
 
 
+def get_top_bottom_points(contour):
+    box = np.intp(cv.boxPoints((cv.minAreaRect(contour))))
+
+    sorted_box = sorted(box, key=lambda x: x[1])
+    top = (int((sorted_box[0][0] + sorted_box[1][0]) / 2), int((sorted_box[0][1] + sorted_box[1][1]) / 2))
+    bottom = (int((sorted_box[2][0] + sorted_box[3][0]) / 2), int((sorted_box[2][1] + sorted_box[3][1]) / 2))
+
+    return top, bottom
+
+
+def get_armor_corners(armor):
+    if len(armor) != 2:
+        return ()
+
+    return get_top_bottom_points(armor[0]), get_top_bottom_points(armor[1])
+
+
 def draw_contours(image, contours, color=(0, 255, 0), thickness=2):
     image = cv.drawContours(image, contours, -1, color, thickness)
     return image
+
+
+def get_distance(point1, point2):
+    x1, y1 = point1
+    x2, y2 = point2
+    distance = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    return distance
 
 
 def get_armor(contours):
@@ -226,36 +251,27 @@ def get_armor(contours):
         center_left = armor_left_rect[0]
         center_right = armor_right_rect[0]
 
-        height_left = max(armor_left_rect[0][0], armor_right_rect[0][1])
-        height_right = max(armor_right_rect[1][0], armor_left_rect[1][1])
-        avg_height = (height_right + height_left) / 2
+        lt, lb = get_top_bottom_points(i[0])
+        rt, rb = get_top_bottom_points(i[1])
+
+        height_left = get_distance(lt, lb)
+        height_right = get_distance(rt, rb)
+
+        average_height = (height_left + height_right) / 2
+
+        armor_width = get_distance(center_left, center_right)
 
         if abs(angle_left - angle_right) > 10:
             continue
 
-        if abs(center_left[1] - center_right[1]) > avg_height * 0.1:
+        if max(height_left, height_right) / min(height_left, height_right) > 1.5:
+            continue
+
+        if not 2 < armor_width / average_height < 3:
             continue
 
         armor.append(i)
     return armor
-
-
-def get_armor_corners(armor):
-    if len(armor) != 2:
-        return ()
-
-    left_box = np.intp(cv.boxPoints(cv.minAreaRect(armor[0])))
-    right_box = np.intp(cv.boxPoints(cv.minAreaRect(armor[1])))
-
-    left_box = sorted(left_box, key=lambda x: x[1])
-    lt = (int((left_box[0][0] + left_box[1][0]) / 2), int((left_box[0][1] + left_box[1][1]) / 2))
-    lb = (int((left_box[2][0] + left_box[3][0]) / 2), int((left_box[2][1] + left_box[3][1]) / 2))
-
-    right_box = sorted(right_box, key=lambda x: x[1])
-    rt = (int((right_box[0][0] + right_box[1][0]) / 2), int((right_box[0][1] + right_box[1][1]) / 2))
-    rb = (int((right_box[2][0] + right_box[3][0]) / 2), int((right_box[2][1] + right_box[3][1]) / 2))
-
-    return lt, lb, rt, rb
 
 
 def get_hit_point(armor):
@@ -283,11 +299,12 @@ def draw_armor(image, armors, color=(255, 0, 0), thickness=1, radius=5, hit_poin
         hit_point = get_hit_point(armor)
         corners = get_armor_corners(armor)
         for corner in corners:
-            image = cv.circle(image, corner, radius, hit_point_color, thickness)
+            image = cv.circle(image, corner[0], radius, hit_point_color, thickness)
+            image = cv.circle(image, corner[1], radius, hit_point_color, thickness)
         image = cv.circle(image, hit_point, radius, hit_point_color, thickness)
 
-        image = cv.line(image, corners[0], corners[3], color, thickness)
-        image = cv.line(image, corners[1], corners[2], color, thickness)
+        image = cv.line(image, corners[0][0], corners[1][1], color, thickness)
+        image = cv.line(image, corners[0][1], corners[1][0], color, thickness)
 
     return image
 
@@ -430,22 +447,25 @@ if __name__ == '__main__':
         ec_data = parser.read_frame()[2]
         yaw, pitch, roll = ec_data[0], ec_data[1], ec_data[2]
 
-        binary_frame = pre_process(frame, 120, TARGET_COLOR)
+        binary_frame = pre_process(frame, 100, 120, TARGET_COLOR)
+        cv.imshow("Binary", binary_frame)
 
         armor_lights = get_all_armor_light(binary_frame)
         armors = get_armor(armor_lights)
 
         for armor in armors:
-            lt, lb, rt, rb = get_armor_corners(armor)
+            left, right = get_armor_corners(armor)
             armor_img_points = np.array([
-                [lt[0], lt[1]],  # 左上角 lt
-                [lb[0], lb[1]],  # 左下角 lb
-                [rt[0], rt[1]],  # 右上角 rt
-                [rb[0], rb[1]]  # 右下角 rb
+                [left[0][0], left[0][1]],  # 左上角 lt
+                [left[1][0], left[1][1]],  # 左下角 lb
+                [right[0][0], right[0][1]],  # 右上角 rt
+                [right[1][0], right[1][1]]  # 右下角 rb
             ], dtype=np.float32)
 
             ret, rvecs, tvecs = cv.solvePnP(armor_obj_points, armor_img_points, mv_camera.camera_matrix,
                                             mv_camera.dist_coeffs)
+
+            print(ret, rvecs, tvecs)
 
         target_frame = draw_armor(frame, armors)
 
