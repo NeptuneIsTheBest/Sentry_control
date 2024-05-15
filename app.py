@@ -3,6 +3,7 @@ import platform
 import struct
 import subprocess
 
+import cv2
 import cv2 as cv
 import numpy as np
 import serial
@@ -150,12 +151,18 @@ class SerialProtocolParser:
 
 
 def pre_process(image, threshold=120, color="RED"):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    _, gray_binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+
     image_channels = cv.split(image)
     if color == "RED":
         image = cv.subtract(image_channels[2], image_channels[0])
     elif color == "BLUE":
         image = cv.subtract(image_channels[0], image_channels[2])
-    _, binary = cv.threshold(image, threshold, 255, cv.THRESH_BINARY)
+    _, color_binary = cv.threshold(image, threshold, 255, cv.THRESH_BINARY)
+
+    binary = cv.bitwise_and(color_binary, gray_binary)
 
     element = cv.getStructuringElement(cv.MORPH_RECT, [5, 5], [3, 3])
     binary = cv.morphologyEx(binary, cv.MORPH_OPEN, element)
@@ -167,16 +174,13 @@ def pre_process(image, threshold=120, color="RED"):
 
 
 def get_armor_light_angle(rotated_rect):
-    width, height = rotated_rect[1][0], rotated_rect[1][1]
+    width, height = rotated_rect[1]
     angle = rotated_rect[2]
 
     if width > height:
         angle += 90
 
-    if angle < 0:
-        angle += 180
-    elif angle >= 180:
-        angle -= 180
+    angle = angle % 180
 
     return angle
 
@@ -406,6 +410,13 @@ class MvCamera:
 TARGET_COLOR = "RED"
 VCP_PORT = "/dev/tty.usbmodem3157376B34391"
 
+armor_obj_points = np.array([
+    [0, 0, 0],  # 左上角 lt
+    [0, 56.5, 0],  # 左下角 lb
+    [140.5, 0, 0],  # 右上角 rt
+    [140.5, 56.5, 0]  # 右下角 rb
+], dtype=np.float32)
+
 if __name__ == '__main__':
     if platform.system() == "Linux":
         subprocess.run("sudo chmod 666 {}".format(VCP_PORT).split())
@@ -423,9 +434,21 @@ if __name__ == '__main__':
         binary_frame = pre_process(frame, 120, TARGET_COLOR)
 
         armor_lights = get_all_armor_light(binary_frame)
-        armor = get_armor(armor_lights)
+        armors = get_armor(armor_lights)
 
-        target_frame = draw_armor(frame, armor)
+        for armor in armors:
+            lt, lb, rt, rb = get_armor_corners(armor)
+            armor_img_points = np.array([
+                [lt[0], lt[1]],  # 左上角 lt
+                [lb[0], lb[1]],  # 左下角 lb
+                [rt[0], rt[1]],  # 右上角 rt
+                [rb[0], rb[1]]  # 右下角 rb
+            ], dtype=np.float32)
+
+            ret, rvecs, tvecs = cv.solvePnP(armor_obj_points, armor_img_points, mv_camera.camera_matrix,
+                                            mv_camera.dist_coeffs)
+
+        target_frame = draw_armor(frame, armors)
 
         cv.imshow("Target", target_frame)
 
