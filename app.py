@@ -3,6 +3,7 @@ import pickle
 import platform
 import struct
 import subprocess
+import time
 
 import cv2 as cv
 import numpy as np
@@ -108,6 +109,7 @@ class SerialProtocolParser:
         return header, data_length, header_crc
 
     def read_frame(self):
+        self.ser.reset_input_buffer()
         header, data_length, _ = self._find_header()
 
         # 读取控制位
@@ -129,6 +131,7 @@ class SerialProtocolParser:
         return cmd_id, flags_register, float_data
 
     def send_frame(self, cmd_id, flags_register, data):
+        # self.ser.reset_output_buffer()
         data_length = 2 + 4 * len(data)
         header = struct.pack("<BH", 0xA5, data_length)
         header_crc = crc_8(header)
@@ -309,6 +312,18 @@ def draw_armor(image, armors, color=(255, 0, 0), thickness=1, radius=5, hit_poin
     return image
 
 
+def draw_armor_info(image, armor, distance, color=(255, 0, 0), thickness=1):
+    if len(armor) != 2:
+        return image
+
+    lt = get_top_bottom_points(armor[0])[0]
+
+    image = cv.putText(image, "distance:{}".format(distance), lt, cv.FONT_HERSHEY_SIMPLEX, 1, color, thickness,
+                       cv.LINE_AA)
+
+    return image
+
+
 class MvCamera:
     def __init__(self, pipe=0, img_size=640):
         self.pipe = pipe
@@ -426,12 +441,11 @@ class MvCamera:
 TARGET_COLOR = "RED"
 VCP_PORT = "COM5"
 
-armor_obj_points = np.array([
-    [0, 0, 0],  # 左上角 lt
-    [0, 56.5, 0],  # 左下角 lb
-    [140.5, 0, 0],  # 右上角 rt
-    [140.5, 56.5, 0]  # 右下角 rb
-], dtype=np.float32)
+armor_obj_points = np.array([[0, 0, 0],  # 左上角 lt
+                             [0, 56.5, 0],  # 左下角 lb
+                             [140.5, 0, 0],  # 右上角 rt
+                             [140.5, 56.5, 0]  # 右下角 rb
+                             ], dtype=np.float32)
 
 if __name__ == '__main__':
     if platform.system() == "Linux":
@@ -445,31 +459,41 @@ if __name__ == '__main__':
 
     for frame in mv_camera:
         ec_data = parser.read_frame()[2]
-        yaw, pitch, roll = ec_data[0], ec_data[1], ec_data[2]
+        yaw, pitch, roll = 0, 0, 0
 
         binary_frame = pre_process(frame, 100, 120, TARGET_COLOR)
-        cv.imshow("Binary", binary_frame)
+        # cv.imshow("Binary", binary_frame)
 
         armor_lights = get_all_armor_light(binary_frame)
         armors = get_armor(armor_lights)
 
         for armor in armors:
             left, right = get_armor_corners(armor)
-            armor_img_points = np.array([
-                [left[0][0], left[0][1]],  # 左上角 lt
-                [left[1][0], left[1][1]],  # 左下角 lb
-                [right[0][0], right[0][1]],  # 右上角 rt
-                [right[1][0], right[1][1]]  # 右下角 rb
-            ], dtype=np.float32)
+            armor_img_points = np.array([[left[0][0], left[0][1]],  # 左上角 lt
+                                         [left[1][0], left[1][1]],  # 左下角 lb
+                                         [right[0][0], right[0][1]],  # 右上角 rt
+                                         [right[1][0], right[1][1]]  # 右下角 rb
+                                         ], dtype=np.float32)
 
             ret, rvecs, tvecs = cv.solvePnP(armor_obj_points, armor_img_points, mv_camera.camera_matrix,
                                             mv_camera.dist_coeffs)
+            x = tvecs[0][0]
+            y = tvecs[1][0]
+            z = tvecs[2][0]
+            distance = np.sqrt(x ** 2 + y ** 2 + z ** 2)
 
-            print(ret, rvecs, tvecs)
+            hit_point = get_hit_point(armor)
+
+            if not 300 < hit_point[0] < 330 or not 300 < hit_point[1] < 330:
+                pass
+
+            target_frame = draw_armor_info(frame, armor, distance)
 
         target_frame = draw_armor(frame, armors)
 
         cv.imshow("Target", target_frame)
+
+        # print(pitch, yaw)
 
         parser.send_frame(0x01, set_flag_register([0, 0, 0]), (pitch, yaw, 0, 0, 0, 0))
         if cv.waitKey(1) & 0xFF == ord("q"):
