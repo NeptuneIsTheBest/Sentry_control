@@ -3,7 +3,6 @@ import platform
 import struct
 import subprocess
 
-import cv2
 import cv2 as cv
 import numpy as np
 import serial
@@ -151,9 +150,9 @@ class SerialProtocolParser:
 
 
 def pre_process(image, threshold=120, color="RED"):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
 
-    _, gray_binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+    _, gray_binary = cv.threshold(gray, threshold, 255, cv.THRESH_BINARY)
 
     image_channels = cv.split(image)
     if color == "RED":
@@ -408,7 +407,7 @@ class MvCamera:
 
 
 TARGET_COLOR = "RED"
-VCP_PORT = "/dev/tty.usbmodem3157376B34391"
+VCP_PORT = "COM5"
 
 armor_obj_points = np.array([
     [0, 0, 0],  # 左上角 lt
@@ -428,7 +427,7 @@ if __name__ == '__main__':
     mv_camera = MvCamera()
 
     for frame in mv_camera:
-        ec_data = parser.read_frame()[3]
+        ec_data = parser.read_frame()[2]
         yaw, pitch, roll = ec_data[0], ec_data[1], ec_data[2]
 
         binary_frame = pre_process(frame, 120, TARGET_COLOR)
