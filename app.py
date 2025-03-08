@@ -1,11 +1,12 @@
-import math
+import enum
 import pickle
 import platform
 import struct
 import subprocess
-import time
+from pathlib import Path
+from typing import List
 
-import cv2 as cv
+import cv2
 import numpy as np
 import serial
 
@@ -83,13 +84,16 @@ def get_flag_register(flag_register, flags_length):
 
 
 class SerialProtocolParser:
-    def __init__(self, port, baudrate=115200):
-        self.ser = serial.Serial(port, baudrate)
+    def __init__(self, port, baudrate=115200, timeout=1):
+        try:
+            self.ser = serial.Serial(port, baudrate, timeout=timeout)
+        except serial.SerialException as e:
+            raise Exception(f"Failed to open serial port {port}: {e}")
 
-    def open_serial(self):
-        self.ser.open()
+    def __enter__(self):
+        return self
 
-    def close_serial(self):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         self.ser.close()
 
     def _find_header(self):
@@ -109,7 +113,6 @@ class SerialProtocolParser:
         return header, data_length, header_crc
 
     def read_frame(self):
-        self.ser.reset_input_buffer()
         header, data_length, _ = self._find_header()
 
         # 读取控制位
@@ -131,7 +134,6 @@ class SerialProtocolParser:
         return cmd_id, flags_register, float_data
 
     def send_frame(self, cmd_id, flags_register, data):
-        # self.ser.reset_output_buffer()
         data_length = 2 + 4 * len(data)
         header = struct.pack("<BH", 0xA5, data_length)
         header_crc = crc_8(header)
@@ -150,178 +152,324 @@ class SerialProtocolParser:
         self.ser.write(frame)
 
     def __del__(self):
-        self.close_serial()
+        if hasattr(self, 'ser') and self.ser.is_open:
+            self.ser.close()
 
 
-def pre_process(image, gray_threshold=50, threshold=120, color="RED"):
-    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
-
-    _, gray_binary = cv.threshold(gray, gray_threshold, 255, cv.THRESH_BINARY)
-
-    image_channels = cv.split(image)
-    if color == "RED":
-        image = cv.subtract(image_channels[2], image_channels[0])
-    elif color == "BLUE":
-        image = cv.subtract(image_channels[0], image_channels[2])
-    _, color_binary = cv.threshold(image, threshold, 255, cv.THRESH_BINARY)
-
-    binary = cv.bitwise_and(color_binary, gray_binary)
-
-    element = cv.getStructuringElement(cv.MORPH_RECT, [5, 5], [3, 3])
-    binary = cv.morphologyEx(color_binary, cv.MORPH_OPEN, element)
-
-    element = cv.getStructuringElement(cv.MORPH_RECT, [5, 5], [3, 3])
-    binary = cv.morphologyEx(binary, cv.MORPH_CLOSE, element)
-
-    return binary
+class ArmorType(enum.Enum):
+    INVALID = 0
+    SMALL = 1
+    LARGE = 2
 
 
-def get_armor_light_angle(rotated_rect):
-    width, height = rotated_rect[1]
-    angle = rotated_rect[2]
-
-    if width > height:
-        angle += 90
-
-    angle = angle % 180
-
-    return angle
+class ArmorColor(enum.Enum):
+    RED = "RED"
+    BLUE = "BLUE"
 
 
-def get_all_armor_light(image):
-    contours, _ = cv.findContours(image, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
-    armor_light_contours = []
-    for i in contours:
-        rect = cv.minAreaRect(i)
-        angle = get_armor_light_angle(rect)
+class ArmorLight:
+    def __init__(self, points):
+        self.points = points
+        self.rect = cv2.minAreaRect(points)
+        self.center = self.rect[0]
+        self.width, self.height = sorted([self.rect[1][0], self.rect[1][1]])
+        self.angle = self.rect[2]
 
-        if angle < 20 or angle > 160:
-            height = max(rect[1][0], rect[1][1])
-            width = min(rect[1][0], rect[1][1])
+        self.tilt_angle = self.angle
+        if self.angle > 90:
+            self.tilt_angle = 180 - self.angle
 
-            if height / width > 2:
-                armor_light_contours.append(i)
-
-    return armor_light_contours
-
-
-def get_top_bottom_points(contour):
-    box = np.intp(cv.boxPoints((cv.minAreaRect(contour))))
-
-    sorted_box = sorted(box, key=lambda x: x[1])
-    top = (int((sorted_box[0][0] + sorted_box[1][0]) / 2), int((sorted_box[0][1] + sorted_box[1][1]) / 2))
-    bottom = (int((sorted_box[2][0] + sorted_box[3][0]) / 2), int((sorted_box[2][1] + sorted_box[3][1]) / 2))
-
-    return top, bottom
+        sorted_box = sorted(cv2.boxPoints(self.rect), key=lambda x: x[1])
+        self.top = np.intp((sorted_box[0][0] + sorted_box[1][0]) / 2, (sorted_box[0][1] + sorted_box[1][1]) / 2)
+        self.bottom = np.intp((sorted_box[2][0] + sorted_box[3][0]) / 2, (sorted_box[2][1] + sorted_box[3][1]) / 2)
 
 
-def get_armor_corners(armor):
-    if len(armor) != 2:
-        return ()
+class Armor:
+    def __init__(self, left_light: ArmorLight, right_light: ArmorLight, armor_type: ArmorType = ArmorType.INVALID):
+        self.left_light = left_light
+        self.right_light = right_light
 
-    return get_top_bottom_points(armor[0]), get_top_bottom_points(armor[1])
+        self.center = (
+            (left_light.center[0] + right_light.center[0]) / 2,
+            (left_light.center[1] + right_light.center[1]) / 2
+        )
+        self.armor_type = armor_type
+        self.number_image = None
 
-
-def draw_contours(image, contours, color=(0, 255, 0), thickness=2):
-    image = cv.drawContours(image, contours, -1, color, thickness)
-    return image
-
-
-def get_distance(point1, point2):
-    x1, y1 = point1
-    x2, y2 = point2
-    distance = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-    return distance
+        self.confidence = None
+        self.number = ""
+        self.classification_result = ""
 
 
-def get_armor(contours):
-    if len(contours) < 2:
-        return []
-    contours.sort(key=lambda x: cv.minAreaRect(x)[0][0])
-    candidate_armor = []
-    for i in range(len(contours) - 1):
-        candidate_armor.append([contours[i], contours[i + 1]])
-
-    armor = []
-
-    for i in candidate_armor:
-        armor_left_rect = cv.minAreaRect(i[0])
-        armor_right_rect = cv.minAreaRect(i[1])
-
-        angle_left = get_armor_light_angle(armor_left_rect)
-        angle_right = get_armor_light_angle(armor_right_rect)
-
-        center_left = armor_left_rect[0]
-        center_right = armor_right_rect[0]
-
-        lt, lb = get_top_bottom_points(i[0])
-        rt, rb = get_top_bottom_points(i[1])
-
-        height_left = get_distance(lt, lb)
-        height_right = get_distance(rt, rb)
-
-        average_height = (height_left + height_right) / 2
-
-        armor_width = get_distance(center_left, center_right)
-
-        if abs(angle_left - angle_right) > 10:
-            continue
-
-        if max(height_left, height_right) / min(height_left, height_right) > 1.5:
-            continue
-
-        if not 2 < armor_width / average_height < 3:
-            continue
-
-        armor.append(i)
-    return armor
+class ArmorLightParams:
+    def __init__(self, min_ratio: float = 0.1, max_ratio: float = 0.5, max_angle: int = 40):
+        self.min_ratio = min_ratio
+        self.max_ratio = max_ratio
+        self.max_angle = max_angle
 
 
-def get_hit_point(armor):
-    if len(armor) != 2:
-        return ()
-
-    left_rect = cv.minAreaRect(armor[0])
-    right_rect = cv.minAreaRect(armor[1])
-
-    hit_point = (int((left_rect[0][0] + right_rect[0][0]) / 2), int((left_rect[0][1] + right_rect[0][1]) / 2))
-
-    return hit_point
-
-
-def draw_armor(image, armors, color=(255, 0, 0), thickness=1, radius=5, hit_point_color=(0, 0, 255)):
-    for armor in armors:
-        if len(armor) != 2:
-            continue
-
-        centers = []
-        for armor_light in armor:
-            rect = cv.minAreaRect(armor_light)
-            centers.append((int(rect[0][0]), int(rect[0][1])))
-
-        hit_point = get_hit_point(armor)
-        corners = get_armor_corners(armor)
-        for corner in corners:
-            image = cv.circle(image, corner[0], radius, hit_point_color, thickness)
-            image = cv.circle(image, corner[1], radius, hit_point_color, thickness)
-        image = cv.circle(image, hit_point, radius, hit_point_color, thickness)
-
-        image = cv.line(image, corners[0][0], corners[1][1], color, thickness)
-        image = cv.line(image, corners[0][1], corners[1][0], color, thickness)
-
-    return image
+class ArmorParams:
+    def __init__(self,
+                 min_light_ratio: float = 0.7,
+                 min_small_center_distance: float = 0.8,
+                 max_small_center_distance: float = 3.2,
+                 min_large_center_distance: float = 3.2,
+                 max_large_center_distance: float = 5.5,
+                 max_angle: float = 35.0):
+        self.min_light_ratio = min_light_ratio
+        self.min_small_center_distance = min_small_center_distance
+        self.max_small_center_distance = max_small_center_distance
+        self.min_large_center_distance = min_large_center_distance
+        self.max_large_center_distance = max_large_center_distance
+        self.max_angle = max_angle
 
 
-def draw_armor_info(image, armor, distance, color=(255, 0, 0), thickness=1):
-    if len(armor) != 2:
-        return image
+class NumberClassifier:
+    def __init__(self, model_path: Path, label_path: Path, threshold: float = 0.5, ignore_classes: List[str] = None):
+        self.model_path = model_path
+        self.label_path = label_path
+        self.threshold = threshold
+        self.ignore_classes = ignore_classes
 
-    lt = get_top_bottom_points(armor[0])[0]
+        self.net = cv2.dnn.readNetFromONNX(str(model_path))
+        self.class_names = []
+        with open(self.label_path, "r") as label_file:
+            for line in label_file:
+                self.class_names.append(line.strip())
 
-    image = cv.putText(image, "distance:{}".format(distance), lt, cv.FONT_HERSHEY_SIMPLEX, 1, color, thickness,
-                       cv.LINE_AA)
+    @staticmethod
+    def extract_numbers(image, armors: List[Armor]):
+        light_length = 12
 
-    return image
+        warp_height = 28
+        small_armor_width = 32
+        large_armor_width = 54
+
+        roi_size = (20, 28)
+
+        for armor in armors:
+            lights_vertices = np.array([armor.left_light.bottom, armor.left_light.top, armor.right_light.top, armor.right_light.bottom], dtype=np.float32)
+
+            top_light_y = (warp_height - light_length) // 2 - 1
+            bottom_light_y = top_light_y + light_length
+            warp_width = small_armor_width if armor.armor_type == ArmorType.SMALL else large_armor_width
+
+            target_vertices = np.array([
+                [0, bottom_light_y],
+                [0, top_light_y],
+                [warp_width - 1, top_light_y],
+                [warp_width - 1, bottom_light_y]
+            ], dtype=np.float32)
+
+            rotation_matrix = cv2.getPerspectiveTransform(lights_vertices, target_vertices)
+            number_image = cv2.warpPerspective(image, rotation_matrix, (warp_width, warp_height))
+
+            start_x = (warp_width - roi_size[0]) // 2
+            number_image = number_image[0:roi_size[1], start_x:start_x + roi_size[0]]
+
+            number_image = cv2.cvtColor(number_image, cv2.COLOR_RGB2GRAY)
+            _, number_image = cv2.threshold(number_image, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+
+            armor.number_image = number_image
+
+    def classify(self, armors: List[Armor]):
+        for armor in armors:
+            image = armor.number_image.copy()
+
+            image = cv2.normalize(image, None, 0, 1, cv2.NORM_MINMAX)
+
+            blob = cv2.dnn.blobFromImage(image)
+
+            self.net.setInput(blob)
+
+            outputs = self.net.forward()
+
+            max_prob = np.max(outputs)
+            softmax_prob = np.exp(outputs - max_prob)
+            sum_val = np.sum(softmax_prob)
+            softmax_prob /= sum_val
+
+            confidence = np.max(softmax_prob)
+            label_id = np.argmax(softmax_prob)
+
+            armor.confidence = confidence
+            armor.number = self.class_names[label_id]
+
+            armor.classification_result = f"{armor.number}: {armor.confidence * 100.0:.1f}%"
+
+        armors[:] = [
+            armor for armor in armors
+            if self._validate_armor(armor)
+        ]
+
+    def _validate_armor(self, armor: Armor):
+        if armor.confidence < self.threshold:
+            return False
+
+        for ignore_class in self.ignore_classes:
+            if armor.number == ignore_class:
+                return False
+
+        mismatch_armor_type = False
+        if armor.armor_type == ArmorType.LARGE:
+            mismatch_armor_type = armor.number in ["outpost", "2", "guard"]
+        elif armor.armor_type == ArmorType.SMALL:
+            mismatch_armor_type = armor.number in ["1", "base"]
+
+        return not mismatch_armor_type
+
+
+class ArmorDetector:
+    def __init__(self,
+                 model_path: Path,
+                 label_path: Path,
+                 gray_threshold: int = 50,
+                 threshold: int = 120,
+                 target_color: ArmorColor = ArmorColor.RED,
+                 armor_light_params: ArmorLightParams = ArmorLightParams(),
+                 armor_params: ArmorParams = ArmorParams(),
+                 classifier_threshold: float = 0.5,
+                 ignore_classes: List[str] = None):
+        self.gray_threshold = gray_threshold
+        self.threshold = threshold
+        self.target_color = target_color
+        self.armor_light_params = armor_light_params
+        self.armor_params = armor_params
+
+        self.classifier = NumberClassifier(model_path, label_path, classifier_threshold, ignore_classes)
+
+    def preprocess_image(self, image):
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        _, gray_binary = cv2.threshold(gray, self.gray_threshold, 255, cv2.THRESH_BINARY)
+
+        image_channels = cv2.split(image)
+        if self.target_color == ArmorColor.RED:
+            image = cv2.subtract(image_channels[2], image_channels[0])
+        elif self.target_color == ArmorColor.BLUE:
+            image = cv2.subtract(image_channels[0], image_channels[2])
+        _, color_binary = cv2.threshold(image, self.threshold, 255, cv2.THRESH_BINARY)
+
+        binary = cv2.bitwise_and(color_binary, gray_binary)
+
+        element = cv2.getStructuringElement(cv2.MORPH_RECT, [5, 5], [3, 3])
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, element)
+
+        element = cv2.getStructuringElement(cv2.MORPH_RECT, [5, 5], [3, 3])
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, element)
+
+        return binary
+
+    def is_light(self, light: ArmorLight) -> bool:
+        ratio = light.width / light.height
+        ratio_ok = self.armor_light_params.min_ratio < ratio < self.armor_light_params.max_ratio
+
+        angle_ok = light.tilt_angle < self.armor_light_params.max_angle
+        return ratio_ok and angle_ok
+
+    def is_armor(self, light_1: ArmorLight, light_2: ArmorLight) -> ArmorType:
+        light_length_ratio = min(light_1.width, light_2.width) / max(light_1.width, light_2.width)
+        light_ratio_ok = light_length_ratio > self.armor_light_params.min_ratio
+
+        avg_light_length = (light_1.width + light_2.width) / 2
+        center_distance = np.linalg.norm(np.array(light_1.center) - np.array(light_2.center)) / avg_light_length
+        center_distance_ok = (
+                (self.armor_params.min_small_center_distance <= center_distance <= self.armor_params.max_small_center_distance) or
+                (self.armor_params.min_large_center_distance <= center_distance <= self.armor_params.max_large_center_distance)
+        )
+
+        diff = np.array(light_1.center) - np.array(light_2.center)
+        angle = np.abs(np.arctan2(diff[1], diff[0])) * 180 / np.pi
+        angle_ok = angle < self.armor_params.max_angle
+
+        is_armor = light_ratio_ok and center_distance_ok and angle_ok
+
+        if is_armor:
+            armor_type = ArmorType.LARGE if center_distance > self.armor_params.min_large_center_distance else ArmorType.SMALL
+        else:
+            armor_type = ArmorType.INVALID
+
+        return armor_type
+
+    def find_lights(self, image) -> List[ArmorLight]:
+        contours, _ = cv2.findContours(image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        lights = []
+        for contour in contours:
+            if len(contour) < 5:
+                continue
+
+            light = ArmorLight(contour)
+
+            if self.is_light(light):
+                lights.append(light)
+        return lights
+
+    @staticmethod
+    def point_in_rect(point, rect):
+        return (
+                rect[0] <= point[0] <= rect[0] + rect[2] and
+                rect[1] <= point[1] <= rect[1] + rect[3]
+        )
+
+    def contain_light(self, light_1: ArmorLight, light_2: ArmorLight, lights: List[ArmorLight]) -> bool:
+        points = np.array([light_1.top, light_1.bottom, light_2.top, light_2.bottom], dtype=np.float32)
+        bounding_rect = cv2.boundingRect(points)
+
+        for test_light in lights:
+            if test_light.center in [light_1.center, light_2.center]:
+                continue
+
+            if (
+                    self.point_in_rect(test_light.top, bounding_rect) or
+                    self.point_in_rect(test_light.bottom, bounding_rect) or
+                    self.point_in_rect(test_light.center, bounding_rect)
+            ):
+                return True
+
+        return False
+
+    def match_lights(self, lights: List[ArmorLight]) -> List[Armor]:
+        armors = []
+        for i in range(len(lights)):
+            light_1 = lights[i]
+            for j in range(i + 1, len(lights)):
+                light_2 = lights[j]
+
+                if self.contain_light(light_1, light_2, lights):
+                    continue
+
+                armor_type = self.is_armor(light_1, light_2)
+                if armor_type != ArmorType.INVALID:
+                    armor = Armor(light_1, light_2, armor_type)
+                    armors.append(armor)
+        return armors
+
+    def detect(self, image) -> List[Armor]:
+        binary_image = self.preprocess_image(image.copy())
+        lights = self.find_lights(binary_image)
+        armors = self.match_lights(lights)
+
+        if armors and self.classifier:
+            self.classifier.extract_numbers(image.copy(), armors)
+            self.classifier.classify(armors)
+
+        return armors
+
+    @staticmethod
+    def draw_result(self, image, lights: List[ArmorLight], armors: List[Armor]):
+        for light in lights:
+            cv2.circle(image, (int(light.top[0]), int(light.top[1])), 3, (255, 255, 255), 1)
+            cv2.circle(image, (int(light.bottom[0]), int(light.bottom[1])), 3, (255, 255, 255), 1)
+            line_color = (255, 255, 0) if self.target_color == ArmorColor.RED else (255, 0, 255)
+            cv2.line(image, (int(light.top[0]), int(light.top[1])), (int(light.bottom[0]), int(light.bottom[1])), line_color, 1)
+
+        for armor in armors:
+            cv2.line(image, (int(armor.left_light.top[0]), int(armor.left_light.top[1])), (int(armor.right_light.bottom[0]), int(armor.right_light.bottom[1])), (0, 255, 0), 2)
+            cv2.line(image, (int(armor.left_light.bottom[0]), int(armor.left_light.bottom[1])), (int(armor.right_light.top[0]), int(armor.right_light.top[1])), (0, 255, 0), 2)
+
+        for armor in armors:
+            cv2.putText(image, armor.classification_result, (int(armor.left_light.top[0]), int(armor.left_light.top[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
 
 class MvCamera:
@@ -335,7 +483,8 @@ class MvCamera:
         if len(dev_list) == 0:
             raise RuntimeError("No camera devices found")
 
-        assert self.pipe < len(dev_list)
+        if self.pipe >= len(dev_list):
+            raise ValueError(f"Invalid camera pipe index: {self.pipe}. Available pipes are 0 to {len(dev_list) - 1}.")
 
         self.dev_info = dev_list[self.pipe]
 
@@ -355,8 +504,7 @@ class MvCamera:
 
         mvsdk.CameraPlay(self.camera_handle)
 
-        self.frame_buffer_size = self.camera_capability.sResolutionRange.iWidthMax * self.camera_capability.sResolutionRange.iHeightMax * (
-            1 if mono_camera else 3)
+        self.frame_buffer_size = self.camera_capability.sResolutionRange.iWidthMax * self.camera_capability.sResolutionRange.iHeightMax * (1 if mono_camera else 3)
         self.frame_buffer = mvsdk.CameraAlignMalloc(self.frame_buffer_size, 16)
 
         try:
@@ -368,39 +516,39 @@ class MvCamera:
         objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
         objp[:, :2] = np.mgrid[0:pattern_size[1], 0:pattern_size[0]].T.reshape(-1, 2)
 
-        criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
 
         obj_points = []
         img_points = []
 
         for frame in self:
-            gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-            ret, corners = cv.findChessboardCorners(gray, pattern_size, None)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            ret, corners = cv2.findChessboardCorners(gray, pattern_size, None)
 
-            key = cv.waitKey(1) & 0xFF
+            key = cv2.waitKey(1) & 0xFF
 
             if ret:
-                sub_pix_corners = cv.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+                sub_pix_corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
 
                 if key == ord(' '):
                     obj_points.append(objp)
                     img_points.append(sub_pix_corners)
 
-                frame = cv.drawChessboardCorners(frame, pattern_size, sub_pix_corners, ret)
+                frame = cv2.drawChessboardCorners(frame, pattern_size, sub_pix_corners, ret)
 
             if len(obj_points) == need_points:
-                ret, self.camera_matrix, self.dist_coeffs, rvecs, tvecs = cv.calibrateCamera(obj_points, img_points, (
-                    self.img_size, self.img_size), None, None)
+                ret, self.camera_matrix, self.dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
+                    obj_points, img_points, (self.img_size, self.img_size), self.camera_matrix, self.dist_coeffs
+                )
                 self.save_camera_calibration_data("camera_calibration.pkl")
                 return ret, self.camera_matrix, self.dist_coeffs, rvecs, tvecs
 
-            frame = cv.putText(frame, "{}".format(len(img_points)), (10, 10), cv.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0),
-                               5, cv.LINE_AA)
-            cv.imshow("Camera Calibration", frame)
+            frame = cv2.putText(frame, "{}".format(len(img_points)), (10, 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 5, cv2.LINE_AA)
+            cv2.imshow("Camera Calibration", frame)
             if key == ord("q"):
                 break
 
-        cv.destroyWindow("Camera Calibration")
+        cv2.destroyWindow("Camera Calibration")
 
     def save_camera_calibration_data(self, filename):
         with open(filename, "wb") as f:
@@ -431,76 +579,84 @@ class MvCamera:
             frame = frame.reshape(frame_header.iHeight, frame_header.iWidth,
                                   1 if frame_header.uiMediaType == mvsdk.CAMERA_MEDIA_TYPE_MONO8 else 3)
 
-            frame = cv.resize(frame, (self.img_size, self.img_size), interpolation=cv.INTER_LINEAR)
+            frame = cv2.resize(frame, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
 
             return frame
         except mvsdk.CameraException as e:
             print(e)
 
 
-TARGET_COLOR = "RED"
-VCP_PORT = "COM5"
+# VCP_PORT = "/dev/ttyUSB0"
+#
+# if __name__ == "__main__":
+#     armor_detector = ArmorDetector()
+#     if platform.system() == "Linux":
+#         subprocess.run("sudo chmod 666 {}".format(VCP_PORT).split())
+#
+#     with SerialProtocolParser("{}".format(VCP_PORT)) as parser:
+#         mv_camera = MvCamera()
+#         for frame in mv_camera:
 
-armor_obj_points = np.array([[0, 0, 0],  # 左上角 lt
-                             [0, 56.5, 0],  # 左下角 lb
-                             [140.5, 0, 0],  # 右上角 rt
-                             [140.5, 56.5, 0]  # 右下角 rb
-                             ], dtype=np.float32)
-
-if __name__ == '__main__':
-    if platform.system() == "Linux":
-        subprocess.run("sudo chmod 666 {}".format(VCP_PORT).split())
-
-    parser = SerialProtocolParser("{}".format(VCP_PORT))
-    parser.close_serial()
-    parser.open_serial()
-
-    mv_camera = MvCamera()
-
-    for frame in mv_camera:
-        ec_data = parser.read_frame()[2]
-        yaw, pitch, roll = 0, 0, 0
-
-        binary_frame = pre_process(frame, 100, 120, TARGET_COLOR)
-        # cv.imshow("Binary", binary_frame)
-
-        armor_lights = get_all_armor_light(binary_frame)
-        armors = get_armor(armor_lights)
-
-        for armor in armors:
-            left, right = get_armor_corners(armor)
-            armor_img_points = np.array([[left[0][0], left[0][1]],  # 左上角 lt
-                                         [left[1][0], left[1][1]],  # 左下角 lb
-                                         [right[0][0], right[0][1]],  # 右上角 rt
-                                         [right[1][0], right[1][1]]  # 右下角 rb
-                                         ], dtype=np.float32)
-
-            ret, rvecs, tvecs = cv.solvePnP(armor_obj_points, armor_img_points, mv_camera.camera_matrix,
-                                            mv_camera.dist_coeffs)
-            x = tvecs[0][0]
-            y = tvecs[1][0]
-            z = tvecs[2][0]
-            distance = np.sqrt(x ** 2 + y ** 2 + z ** 2)
-
-            hit_point = get_hit_point(armor)
-
-            if not 300 < hit_point[0] < 330 or not 300 < hit_point[1] < 330:
-                pass
-
-            target_frame = draw_armor_info(frame, armor, distance)
-
-        target_frame = draw_armor(frame, armors)
-
-        cv.imshow("Target", target_frame)
-
-        # print(pitch, yaw)
-
-        parser.send_frame(0x01, set_flag_register([0, 0, 0]), (pitch, yaw, 0, 0, 0, 0))
-        if cv.waitKey(1) & 0xFF == ord("q"):
-            break
-
-    cv.destroyAllWindows()
-    del mv_camera
+# TARGET_COLOR = "RED"
+# VCP_PORT = "COM5"
+#
+# armor_obj_points = np.array([[0, 0, 0],  # 左上角 lt
+#                              [0, 56.5, 0],  # 左下角 lb
+#                              [140.5, 0, 0],  # 右上角 rt
+#                              [140.5, 56.5, 0]  # 右下角 rb
+#                              ], dtype=np.float32)
+#
+# if __name__ == '__main__':
+#     if platform.system() == "Linux":
+#         subprocess.run("sudo chmod 666 {}".format(VCP_PORT).split())
+#
+#     with SerialProtocolParser("{}".format(VCP_PORT)) as parser:
+#         mv_camera = MvCamera()
+#
+#         for frame in mv_camera:
+#             ec_data = parser.read_frame()[2]
+#             yaw, pitch, roll = 0, 0, 0
+#
+#             binary_frame = pre_process(frame, 100, 120, TARGET_COLOR)
+#             # cv.imshow("Binary", binary_frame)
+#
+#             armor_lights = get_all_armor_light(binary_frame)
+#             armors = get_armor(armor_lights)
+#
+#             for armor in armors:
+#                 left, right = get_armor_corners(armor)
+#                 armor_img_points = np.array([[left[0][0], left[0][1]],  # 左上角 lt
+#                                              [left[1][0], left[1][1]],  # 左下角 lb
+#                                              [right[0][0], right[0][1]],  # 右上角 rt
+#                                              [right[1][0], right[1][1]]  # 右下角 rb
+#                                              ], dtype=np.float32)
+#
+#                 ret, rvecs, tvecs = cv.solvePnP(armor_obj_points, armor_img_points, mv_camera.camera_matrix,
+#                                                 mv_camera.dist_coeffs)
+#                 x = tvecs[0][0]
+#                 y = tvecs[1][0]
+#                 z = tvecs[2][0]
+#                 distance = np.sqrt(x ** 2 + y ** 2 + z ** 2)
+#
+#                 hit_point = get_hit_point(armor)
+#
+#                 if not 300 < hit_point[0] < 330 or not 300 < hit_point[1] < 330:
+#                     pass
+#
+#                 target_frame = draw_armor_info(frame, armor, distance)
+#
+#             target_frame = draw_armor(frame, armors)
+#
+#             cv.imshow("Target", target_frame)
+#
+#             # print(pitch, yaw)
+#
+#             parser.send_frame(0x01, set_flag_register([0, 0, 0]), (pitch, yaw, 0, 0, 0, 0))
+#             if cv.waitKey(1) & 0xFF == ord("q"):
+#                 break
+#
+#         cv.destroyAllWindows()
+#         del mv_camera
 
 # video = cv.VideoCapture("1.avi")
 
