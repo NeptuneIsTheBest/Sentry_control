@@ -4,7 +4,7 @@ import platform
 import struct
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 import cv2
 import numpy as np
@@ -445,7 +445,7 @@ class ArmorDetector:
                     armors.append(armor)
         return armors
 
-    def detect(self, image) -> List[Armor]:
+    def detect(self, image) -> Tuple[List[ArmorLight], List[Armor]]:
         binary_image = self.preprocess_image(image.copy())
         lights = self.find_lights(binary_image)
         armors = self.match_lights(lights)
@@ -454,9 +454,8 @@ class ArmorDetector:
             self.classifier.extract_numbers(image.copy(), armors)
             self.classifier.classify(armors)
 
-        return armors
+        return lights, armors
 
-    @staticmethod
     def draw_result(self, image, lights: List[ArmorLight], armors: List[Armor]):
         for light in lights:
             cv2.circle(image, (int(light.top[0]), int(light.top[1])), 3, (255, 255, 255), 1)
@@ -470,6 +469,8 @@ class ArmorDetector:
 
         for armor in armors:
             cv2.putText(image, armor.classification_result, (int(armor.left_light.top[0]), int(armor.left_light.top[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+        return image
 
 
 class MvCamera:
@@ -558,12 +559,21 @@ class MvCamera:
         with open(filename, "rb") as f:
             self.camera_matrix, self.dist_coeffs = pickle.load(f)
 
+    def close(self):
+        mvsdk.CameraUnInit(self.camera_handle)
+        mvsdk.CameraAlignFree(self.frame_buffer)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
     def __iter__(self):
         return self
 
     def __del__(self):
-        mvsdk.CameraUnInit(self.camera_handle)
-        mvsdk.CameraAlignFree(self.frame_buffer)
+        self.close()
 
     def __next__(self):
         try:
@@ -586,16 +596,23 @@ class MvCamera:
             print(e)
 
 
-# VCP_PORT = "/dev/ttyUSB0"
-#
-# if __name__ == "__main__":
-#     armor_detector = ArmorDetector()
-#     if platform.system() == "Linux":
-#         subprocess.run("sudo chmod 666 {}".format(VCP_PORT).split())
-#
-#     with SerialProtocolParser("{}".format(VCP_PORT)) as parser:
-#         mv_camera = MvCamera()
-#         for frame in mv_camera:
+VCP_PORT = "/dev/ttyUSB0"
+
+if __name__ == "__main__":
+    armor_detector = ArmorDetector(model_path=Path("./model/mlp.onnx"), label_path=Path("./model/labels.txt"))
+    if platform.system() == "Linux":
+        subprocess.run("sudo chmod 666 {}".format(VCP_PORT).split())
+
+    with SerialProtocolParser("{}".format(VCP_PORT)) as parser:
+        with MvCamera() as camera:
+            for frame in camera:
+                lights, armors = armor_detector.detect(frame)
+                frame = armor_detector.draw_result(frame, lights, armors)
+
+                cv2.imshow("Target", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+            cv2.destroyAllWindows()
 
 # TARGET_COLOR = "RED"
 # VCP_PORT = "COM5"
