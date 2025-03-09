@@ -215,13 +215,21 @@ class ArmorParams:
                  max_small_center_distance: float = 3.2,
                  min_large_center_distance: float = 3.2,
                  max_large_center_distance: float = 5.5,
-                 max_angle: float = 35.0):
+                 max_angle: float = 35.0,
+                 small_armor_width: int = 135,
+                 small_armor_height: int = 125,
+                 large_armor_width: int = 230,
+                 large_armor_height: int = 125):
         self.min_light_ratio = min_light_ratio
         self.min_small_center_distance = min_small_center_distance
         self.max_small_center_distance = max_small_center_distance
         self.min_large_center_distance = min_large_center_distance
         self.max_large_center_distance = max_large_center_distance
         self.max_angle = max_angle
+        self.small_armor_width = small_armor_width
+        self.small_armor_height = small_armor_height
+        self.large_armor_width = large_armor_width
+        self.large_armor_height = large_armor_height
 
 
 class NumberClassifier:
@@ -276,7 +284,7 @@ class NumberClassifier:
         for armor in armors:
             image = armor.number_image.copy()
 
-            image = cv2.normalize(image, None, 0, 1, cv2.NORM_MINMAX)
+            image = image / 255.0
 
             blob = cv2.dnn.blobFromImage(image)
 
@@ -471,6 +479,56 @@ class ArmorDetector:
             cv2.putText(image, armor.classification_result, (int(armor.left_light.top[0]), int(armor.left_light.top[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
         return image
+
+
+class PnPSolver:
+    def __init__(self, camera_matrix, dist_coeffs, armor_params: ArmorParams = ArmorParams()):
+        self.camera_matrix = camera_matrix
+        self.dist_coeffs = dist_coeffs
+        self.armor_params = armor_params
+
+        small_half_y = self.armor_params.small_armor_width / 2000.0
+        small_half_z = self.armor_params.small_armor_height / 2000.0
+        large_half_y = self.armor_params.large_armor_width / 2000.0
+        large_half_z = self.armor_params.large_armor_height / 2000.0
+
+        self.small_armor_points = np.array([
+            [0, small_half_y, -small_half_z],
+            [0, small_half_y, small_half_z],
+            [0, -small_half_y, small_half_z],
+            [0, -small_half_y, -small_half_z]
+        ], dtype=np.float32)
+
+        self.large_armor_points = np.array([
+            [0, large_half_y, -large_half_z],
+            [0, large_half_y, large_half_z],
+            [0, -large_half_y, large_half_z],
+            [0, -large_half_y, -large_half_z]
+        ], dtype=np.float32)
+
+    def solve(self, armor: Armor):
+        image_armor_points = np.array([
+            armor.left_light.bottom,
+            armor.left_light.top,
+            armor.right_light.top,
+            armor.right_light.bottom
+        ], dtype=np.float32)
+
+        object_points = self.small_armor_points if armor.armor_type == ArmorType.SMALL else self.large_armor_points
+
+        success, rvec, tvec = cv2.solvePnP(
+            object_points,
+            image_armor_points,
+            self.camera_matrix,
+            self.dist_coeffs,
+            flags=cv2.SOLVEPNP_IPPE
+        )
+
+        return success, rvec, tvec
+
+    def calculate_distance_to_center(self, image_point):
+        cx, cy = self.camera_matrix[0, 2], self.camera_matrix[1, 2]
+        return np.linalg.norm(np.array(image_point) - np.array([cx, cy]))
 
 
 class MvCamera:
