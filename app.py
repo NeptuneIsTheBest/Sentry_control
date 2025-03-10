@@ -4,7 +4,7 @@ import platform
 import struct
 import subprocess
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Union, Optional
 
 import cv2
 import numpy as np
@@ -233,26 +233,23 @@ class ArmorParams:
 
 
 class NumberClassifier:
-    def __init__(self, model_path: Path, label_path: Path, threshold: float = 0.5, ignore_classes: List[str] = None):
+    def __init__(self, model_path: Path, label_path: Path, threshold: float = 0.5, ignore_classes: Optional[List[str]] = None):
         self.model_path = model_path
         self.label_path = label_path
         self.threshold = threshold
-        self.ignore_classes = ignore_classes
+        self.ignore_classes = ignore_classes or []
 
         self.net = cv2.dnn.readNetFromONNX(str(model_path))
-        self.class_names = []
+
         with open(self.label_path, "r") as label_file:
-            for line in label_file:
-                self.class_names.append(line.strip())
+            self.class_names = [line.strip() for line in label_file]
 
     @staticmethod
     def extract_numbers(image, armors: List[Armor]):
         light_length = 12
-
         warp_height = 28
         small_armor_width = 32
         large_armor_width = 54
-
         roi_size = (20, 28)
 
         for armor in armors:
@@ -281,42 +278,40 @@ class NumberClassifier:
             armor.number_image = number_image
 
     def classify(self, armors: List[Armor]):
+        valid_armors = []
+
         for armor in armors:
-            image = armor.number_image.copy()
+            if not hasattr(armor, 'number_image') or armor.number_image is None:
+                continue
 
-            image = image / 255.0
-
+            image = armor.number_image.copy() / 255.0
             blob = cv2.dnn.blobFromImage(image)
 
             self.net.setInput(blob)
-
             outputs = self.net.forward()
 
             max_prob = np.max(outputs)
             softmax_prob = np.exp(outputs - max_prob)
-            sum_val = np.sum(softmax_prob)
-            softmax_prob /= sum_val
+            softmax_prob /= np.sum(softmax_prob)
 
             confidence = np.max(softmax_prob)
             label_id = np.argmax(softmax_prob)
 
             armor.confidence = confidence
             armor.number = self.class_names[label_id]
-
             armor.classification_result = f"{armor.number}: {armor.confidence * 100.0:.1f}%"
 
-        armors[:] = [
-            armor for armor in armors
-            if self._validate_armor(armor)
-        ]
+            if self._validate_armor(armor):
+                valid_armors.append(armor)
 
-    def _validate_armor(self, armor: Armor):
+        armors[:] = valid_armors
+
+    def _validate_armor(self, armor: Armor) -> bool:
         if armor.confidence < self.threshold:
             return False
 
-        for ignore_class in self.ignore_classes:
-            if armor.number == ignore_class:
-                return False
+        if armor.number in self.ignore_classes:
+            return False
 
         mismatch_armor_type = False
         if armor.armor_type == ArmorType.LARGE:
@@ -333,6 +328,7 @@ class ArmorDetector:
                  label_path: Path,
                  gray_threshold: int = 50,
                  threshold: int = 120,
+                 morph_element: Union[cv2.Mat, np.ndarray] = cv2.getStructuringElement(cv2.MORPH_RECT, [5, 5], [3, 3]),
                  target_color: ArmorColor = ArmorColor.RED,
                  armor_light_params: ArmorLightParams = ArmorLightParams(),
                  armor_params: ArmorParams = ArmorParams(),
@@ -340,67 +336,58 @@ class ArmorDetector:
                  ignore_classes: List[str] = None):
         self.gray_threshold = gray_threshold
         self.threshold = threshold
+        self.morph_element = morph_element
         self.target_color = target_color
         self.armor_light_params = armor_light_params
         self.armor_params = armor_params
-
         self.classifier = NumberClassifier(model_path, label_path, classifier_threshold, ignore_classes)
 
     def preprocess_image(self, image):
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
         _, gray_binary = cv2.threshold(gray, self.gray_threshold, 255, cv2.THRESH_BINARY)
 
-        image_channels = cv2.split(image)
+        b, g, r = cv2.split(image)
         if self.target_color == ArmorColor.RED:
-            image = cv2.subtract(image_channels[2], image_channels[0])
-        elif self.target_color == ArmorColor.BLUE:
-            image = cv2.subtract(image_channels[0], image_channels[2])
-        _, color_binary = cv2.threshold(image, self.threshold, 255, cv2.THRESH_BINARY)
+            color_diff = cv2.subtract(r, b)
+        else:
+            color_diff = cv2.subtract(b, r)
+        _, color_binary = cv2.threshold(color_diff, self.threshold, 255, cv2.THRESH_BINARY)
 
         binary = cv2.bitwise_and(color_binary, gray_binary)
 
-        element = cv2.getStructuringElement(cv2.MORPH_RECT, [5, 5], [3, 3])
-        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, element)
-
-        element = cv2.getStructuringElement(cv2.MORPH_RECT, [5, 5], [3, 3])
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, element)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, self.morph_element)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self.morph_element)
 
         return binary
 
     def is_light(self, light: ArmorLight) -> bool:
         ratio = light.width / light.height
-        ratio_ok = self.armor_light_params.min_ratio < ratio < self.armor_light_params.max_ratio
-
-        angle_ok = light.tilt_angle < self.armor_light_params.max_angle
-        return ratio_ok and angle_ok
+        return (self.armor_light_params.min_ratio < ratio < self.armor_light_params.max_ratio and
+                light.tilt_angle < self.armor_light_params.max_angle)
 
     def is_armor(self, light_1: ArmorLight, light_2: ArmorLight) -> ArmorType:
         light_length_ratio = min(light_1.width, light_2.width) / max(light_1.width, light_2.width)
-        light_ratio_ok = light_length_ratio > self.armor_light_params.min_ratio
+        if light_length_ratio <= self.armor_light_params.min_ratio:
+            return ArmorType.INVALID
 
+        light_centers_diff = np.array(light_1.center) - np.array(light_2.center)
         avg_light_length = (light_1.width + light_2.width) / 2
-        center_distance = np.linalg.norm(np.array(light_1.center) - np.array(light_2.center)) / avg_light_length
-        center_distance_ok = (
-                (self.armor_params.min_small_center_distance <= center_distance <= self.armor_params.max_small_center_distance) or
-                (self.armor_params.min_large_center_distance <= center_distance <= self.armor_params.max_large_center_distance)
-        )
+        center_distance = np.linalg.norm(light_centers_diff) / avg_light_length
 
-        diff = np.array(light_1.center) - np.array(light_2.center)
-        angle = np.abs(np.arctan2(diff[1], diff[0])) * 180 / np.pi
-        angle_ok = angle < self.armor_params.max_angle
+        small_armor_distance = (self.armor_params.min_small_center_distance <= center_distance <= self.armor_params.max_small_center_distance)
+        large_armor_distance = (self.armor_params.min_large_center_distance <= center_distance <= self.armor_params.max_large_center_distance)
 
-        is_armor = light_ratio_ok and center_distance_ok and angle_ok
+        if not (small_armor_distance or large_armor_distance):
+            return ArmorType.INVALID
 
-        if is_armor:
-            armor_type = ArmorType.LARGE if center_distance > self.armor_params.min_large_center_distance else ArmorType.SMALL
-        else:
-            armor_type = ArmorType.INVALID
+        angle = np.abs(np.arctan2(light_centers_diff[1], light_centers_diff[0])) * 180 / np.pi
+        if angle >= self.armor_params.max_angle:
+            return ArmorType.INVALID
 
-        return armor_type
+        return ArmorType.LARGE if center_distance > self.armor_params.min_large_center_distance else ArmorType.SMALL
 
-    def find_lights(self, image) -> List[ArmorLight]:
-        contours, _ = cv2.findContours(image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    def find_lights(self, binary_image) -> List[ArmorLight]:
+        contours, _ = cv2.findContours(binary_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         lights = []
         for contour in contours:
@@ -408,24 +395,23 @@ class ArmorDetector:
                 continue
 
             light = ArmorLight(contour)
-
             if self.is_light(light):
                 lights.append(light)
         return lights
 
     @staticmethod
     def point_in_rect(point, rect):
-        return (
-                rect[0] <= point[0] <= rect[0] + rect[2] and
-                rect[1] <= point[1] <= rect[1] + rect[3]
-        )
+        x, y = point
+        rx, ry, rw, rh = rect
+        return rx <= x <= rx + rw and ry <= y <= ry + rh
 
     def contain_light(self, light_1: ArmorLight, light_2: ArmorLight, lights: List[ArmorLight]) -> bool:
         points = np.array([light_1.top, light_1.bottom, light_2.top, light_2.bottom], dtype=np.float32)
         bounding_rect = cv2.boundingRect(points)
 
+        light_centers = [light_1.center, light_2.center]
         for test_light in lights:
-            if test_light.center in [light_1.center, light_2.center]:
+            if test_light.center in light_centers:
                 continue
 
             if (
@@ -454,29 +440,38 @@ class ArmorDetector:
         return armors
 
     def detect(self, image) -> Tuple[List[ArmorLight], List[Armor]]:
-        binary_image = self.preprocess_image(image.copy())
+        binary_image = self.preprocess_image(image)
+
         lights = self.find_lights(binary_image)
         armors = self.match_lights(lights)
 
         if armors and self.classifier:
-            self.classifier.extract_numbers(image.copy(), armors)
+            self.classifier.extract_numbers(image, armors)
             self.classifier.classify(armors)
 
         return lights, armors
 
     def draw_result(self, image, lights: List[ArmorLight], armors: List[Armor]):
         for light in lights:
-            cv2.circle(image, (int(light.top[0]), int(light.top[1])), 3, (255, 255, 255), 1)
-            cv2.circle(image, (int(light.bottom[0]), int(light.bottom[1])), 3, (255, 255, 255), 1)
+            top = tuple(map(int, light.top))
+            bottom = tuple(map(int, light.bottom))
+
+            cv2.circle(image, top, 3, (255, 255, 255), 1)
+            cv2.circle(image, bottom, 3, (255, 255, 255), 1)
+
             line_color = (255, 255, 0) if self.target_color == ArmorColor.RED else (255, 0, 255)
-            cv2.line(image, (int(light.top[0]), int(light.top[1])), (int(light.bottom[0]), int(light.bottom[1])), line_color, 1)
+            cv2.line(image, top, bottom, line_color, 1)
 
         for armor in armors:
-            cv2.line(image, (int(armor.left_light.top[0]), int(armor.left_light.top[1])), (int(armor.right_light.bottom[0]), int(armor.right_light.bottom[1])), (0, 255, 0), 2)
-            cv2.line(image, (int(armor.left_light.bottom[0]), int(armor.left_light.bottom[1])), (int(armor.right_light.top[0]), int(armor.right_light.top[1])), (0, 255, 0), 2)
+            left_top = tuple(map(int, armor.left_light.top))
+            left_bottom = tuple(map(int, armor.left_light.bottom))
+            right_top = tuple(map(int, armor.right_light.top))
+            right_bottom = tuple(map(int, armor.right_light.bottom))
 
-        for armor in armors:
-            cv2.putText(image, armor.classification_result, (int(armor.left_light.top[0]), int(armor.left_light.top[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            cv2.line(image, left_top, right_bottom, (0, 255, 0), 2)
+            cv2.line(image, left_bottom, right_top, (0, 255, 0), 2)
+
+            cv2.putText(image, armor.classification_result, left_top, cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
         return image
 
